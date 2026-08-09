@@ -1058,7 +1058,7 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   Future<void> _pickAssets(List<String> exts) async {
-    final res = await FilePicker.platform.pickFiles(
+    final res = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: exts,
       allowMultiple: true,
