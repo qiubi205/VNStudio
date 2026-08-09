@@ -1,0 +1,21 @@
+# Dart / Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.iml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Android
+*.keystore
+!debug.keystore
+local.properties
+
+# Misc
+*.log
+tools/__pycache__/
