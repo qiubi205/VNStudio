@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.qiubi205.vn_studio"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
