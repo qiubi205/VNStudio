@@ -460,41 +460,48 @@ class _EditorScreenState extends State<EditorScreen> {
       return Scaffold(
           appBar: AppBar(), body: const Center(child: CircularProgressIndicator()));
     }
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(p.title.isEmpty ? '未命名作品' : p.title),
-        actions: [
-          IconButton(
-              icon: const Icon(Icons.auto_awesome),
-              tooltip: 'AI 生成剧本',
-              onPressed: _ai),
-          IconButton(
-              icon: const Icon(Icons.play_circle_outline),
-              tooltip: '试玩',
-              onPressed: _play),
-          IconButton(
-              icon: const Icon(Icons.ios_share),
-              tooltip: '导出项目包',
-              onPressed: _export),
-        ],
-      ),
-      body: Column(
-        children: [
-          TabBar(
-            tabs: const [
-              Tab(text: '📝 剧本'),
-              Tab(text: '🎨 资产'),
-              Tab(text: '📦 导出'),
-            ],
-            onTap: (i) => setState(() => _tab = i),
-          ),
-          Expanded(
-            child: IndexedStack(
-              index: _tab,
-              children: [_buildScriptTab(), _buildAssetsTab(), _buildExportTab()],
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(p.title.isEmpty ? '未命名作品' : p.title),
+          actions: [
+            IconButton(
+                icon: const Icon(Icons.auto_awesome),
+                tooltip: 'AI 生成剧本',
+                onPressed: _ai),
+            IconButton(
+                icon: const Icon(Icons.play_circle_outline),
+                tooltip: '试玩',
+                onPressed: _play),
+            IconButton(
+                icon: const Icon(Icons.ios_share),
+                tooltip: '导出项目包',
+                onPressed: _export),
+          ],
+        ),
+        body: Column(
+          children: [
+            TabBar(
+              tabs: const [
+                Tab(text: '📝 剧本'),
+                Tab(text: '🎨 资产'),
+                Tab(text: '📦 导出'),
+              ],
+              onTap: (i) => setState(() => _tab = i),
             ),
-          ),
-        ],
+            Expanded(
+              child: IndexedStack(
+                index: _tab,
+                children: [
+                  _buildScriptTab(),
+                  _buildAssetsTab(),
+                  _buildExportTab()
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
