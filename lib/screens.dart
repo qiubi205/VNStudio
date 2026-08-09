@@ -178,65 +178,15 @@ class EditorScreen extends StatefulWidget {
   State<EditorScreen> createState() => _EditorScreenState();
 }
 
-/// 带外部值同步的文本框：用 controller 承载 initialValue，key 变化时重建
-/// （切换场景/行时表单值强制刷新，打字时不丢光标）
-class _SyncField extends StatefulWidget {
-  const _SyncField({
-    super.key,
-    required this.value,
-    required this.onChanged,
-    this.decoration,
-    this.minLines = 1,
-    this.maxLines = 1,
-  });
-
-  final String value;
-  final ValueChanged<String> onChanged;
-  final InputDecoration? decoration;
-  final int minLines;
-  final int maxLines;
-
-  @override
-  State<_SyncField> createState() => _SyncFieldState();
-}
-
-class _SyncFieldState extends State<_SyncField> {
-  late final TextEditingController _c =
-      TextEditingController(text: widget.value);
-
-  @override
-  void didUpdateWidget(_SyncField old) {
-    super.didUpdateWidget(old);
-    if (widget.value != _c.text && !_c.selection.isValid) {
-      _c.text = widget.value;
-    }
-  }
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => TextField(
-        controller: _c,
-        decoration: widget.decoration,
-        minLines: widget.minLines,
-        maxLines: widget.maxLines,
-        onChanged: widget.onChanged,
-      );
-}
-
 class _EditorScreenState extends State<EditorScreen> {
   Project? _p;
   List<File> _assets = [];
   int _tab = 0;
   String? _sel;
+  (double, double)? _dragStart;
   bool _busy = false;
   AudioPlayer? _preview;
   /// 表单版本号：剧本整体替换（新建/AI 应用/加载）时自增，强制重建编辑器表单
-  int _formEpoch = 0;
 
   @override
   void initState() {
@@ -257,7 +207,6 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() {
       _p = p;
       _assets = assets;
-      _formEpoch++;
       if (p != null && p.script.scenes.isNotEmpty) _sel = p.script.scenes.first.id;
     });
   }
@@ -291,47 +240,9 @@ class _EditorScreenState extends State<EditorScreen> {
     return p.script.findScene(_sel!);
   }
 
-  // ---------- 剧本操作 ----------
-  void _setScene(String field, dynamic v) {
-    final sc = _current();
-    if (sc == null) return;
-    _mutate(() {
-      switch (field) {
-        case 'name': sc.name = v as String;
-        case 'bg': sc.bg = v as String;
-        case 'bgm': sc.bgm = v as String;
-        case 'bgm_volume': sc.bgmVolume = (v as num).toDouble();
-        case 'next': sc.next = v as String;
-      }
-    });
-  }
-
-  void _setLine(int i, String field, dynamic v) {
-    final sc = _current();
-    if (sc == null || i < 0 || i >= sc.dialogue.length) return;
-    final ln = sc.dialogue[i];
-    _mutate(() {
-      switch (field) {
-        case 'speaker': ln.speaker = v as String;
-        case 'text': ln.text = v as String;
-        case 'cg': ln.cg = v as String;
-      }
-    });
-  }
-
-  void _setChoice(int i, String field, dynamic v) {
-    final sc = _current();
-    if (sc == null || i < 0 || i >= sc.choices.length) return;
-    final ch = sc.choices[i];
-    _mutate(() {
-      switch (field) {
-        case 'text': ch.text = v as String;
-        case 'next': ch.next = v as String;
-      }
-    });
-  }
-
-  void _addScene() {
+  // ---------- 剧本操作（画布节点版） ----------
+  /// 点画布空白处创建节点
+  void _addSceneAt(double rx, double ry) {
     final p = _p;
     if (p == null) return;
     var n = 1;
@@ -339,11 +250,48 @@ class _EditorScreenState extends State<EditorScreen> {
     while (ids.contains('s$n')) {
       n++;
     }
-    final sc = Scene(id: 's$n', name: '场景 $n', dialogue: [Line()]);
+    final sc = Scene(
+        id: 's$n',
+        name: '场景 $n',
+        x: rx.clamp(0.05, 0.95),
+        y: ry.clamp(0.05, 0.95));
     _mutate(() {
       p.script.scenes.add(sc);
       _sel = sc.id;
     });
+    _toast('已创建「${sc.name}」，用下方工具栏添加内容');
+  }
+
+  void _renameScene(Scene sc) {
+    final ctrl = TextEditingController(text: sc.name);
+    showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('重命名节点'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '场景名称'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c), child: const Text('取消')),
+          FilledButton(
+              onPressed: () {
+                final v = ctrl.text.trim();
+                if (v.isNotEmpty) _mutate(() => sc.name = v);
+                Navigator.pop(c);
+              },
+              child: const Text('确定')),
+        ],
+      ),
+    );
+  }
+
+  /// 添加一句剧情并立即打开剧情编辑面板
+  void _addStoryLine(Scene sc) {
+    _mutate(() => sc.dialogue.add(Line()));
+    _editStory(sc);
   }
 
   void _delScene() {
@@ -379,36 +327,10 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
-  void _moveScene(int dir) {
-    final p = _p;
-    if (p == null || _sel == null) return;
-    final i = p.script.indexOfScene(_sel!);
+  /// 台词移动/删除（剧情面板内使用）
+  void _moveLine(Scene sc, int i, int dir) {
     final j = i + dir;
-    if (i < 0 || j < 0 || j >= p.script.scenes.length) return;
-    _mutate(() {
-      final t = p.script.scenes[i];
-      p.script.scenes[i] = p.script.scenes[j];
-      p.script.scenes[j] = t;
-    });
-  }
-
-  void _addLine() {
-    final sc = _current();
-    if (sc == null) return;
-    _mutate(() => sc.dialogue.add(Line()));
-  }
-
-  void _delLine(int i) {
-    final sc = _current();
-    if (sc == null || i < 0 || i >= sc.dialogue.length) return;
-    _mutate(() => sc.dialogue.removeAt(i));
-  }
-
-  void _moveLine(int i, int dir) {
-    final sc = _current();
-    if (sc == null) return;
-    final j = i + dir;
-    if (i < 0 || j < 0 || j >= sc.dialogue.length) return;
+    if (j < 0 || j >= sc.dialogue.length) return;
     _mutate(() {
       final t = sc.dialogue[i];
       sc.dialogue[i] = sc.dialogue[j];
@@ -416,28 +338,40 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
-  void _addChoice() {
-    final sc = _current();
-    if (sc == null) return;
-    _mutate(() => sc.choices.add(Choice()));
+  void _delLine(Scene sc, int i) {
+    if (i < 0 || i >= sc.dialogue.length) return;
+    _mutate(() => sc.dialogue.removeAt(i));
   }
 
-  void _delChoice(int i) {
-    final sc = _current();
-    if (sc == null || i < 0 || i >= sc.choices.length) return;
-    _mutate(() => sc.choices.removeAt(i));
-  }
-
-  void _moveChoice(int i, int dir) {
-    final sc = _current();
-    if (sc == null) return;
+  void _moveChoice(Scene sc, int i, int dir) {
     final j = i + dir;
-    if (i < 0 || j < 0 || j >= sc.choices.length) return;
+    if (j < 0 || j >= sc.choices.length) return;
     _mutate(() {
       final t = sc.choices[i];
       sc.choices[i] = sc.choices[j];
       sc.choices[j] = t;
     });
+  }
+
+  void _delChoice(Scene sc, int i) {
+    if (i < 0 || i >= sc.choices.length) return;
+    _mutate(() => sc.choices.removeAt(i));
+  }
+
+  /// 字符串列表（CG/BGM 素材）移动/删除
+  void _moveStr(List<String> l, int i, int dir) {
+    final j = i + dir;
+    if (j < 0 || j >= l.length) return;
+    _mutate(() {
+      final t = l[i];
+      l[i] = l[j];
+      l[j] = t;
+    });
+  }
+
+  void _delStr(List<String> l, int i) {
+    if (i < 0 || i >= l.length) return;
+    _mutate(() => l.removeAt(i));
   }
 
   void _setTitle(String v) {
@@ -451,7 +385,6 @@ class _EditorScreenState extends State<EditorScreen> {
     if (p == null) return;
     _mutate(() => p.script.summary = v);
   }
-
   // ---------- AI ----------
   Future<void> _ai() async {
     final result = await showDialog<Map<String, dynamic>>(
@@ -481,7 +414,6 @@ class _EditorScreenState extends State<EditorScreen> {
       _p!.script = script;
       AiService.autoAddCharacters(_p!);
       _sel = script.scenes.isNotEmpty ? script.scenes.first.id : null;
-      _formEpoch++;
     });
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(demo
@@ -567,312 +499,707 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  // ---------------- 剧本 Tab ----------------
+  // ---------------- 剧本 Tab（画布节点编辑器） ----------------
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg), duration: const Duration(seconds: 2)));
+  }
+
   Widget _buildScriptTab() {
     final p = _p!;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Column(
       children: [
-        SizedBox(
-          width: 148,
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(8),
-                child: Row(
+        Expanded(
+          child: LayoutBuilder(
+            builder: (c, cons) {
+              final w = cons.maxWidth;
+              final h = cons.maxHeight;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapUp: (d) =>
+                    _addSceneAt(d.localPosition.dx / w, d.localPosition.dy / h),
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                        child: Container(
+                      color: const Color(0xFF25252B),
+                      child: const CustomPaint(painter: _DotGridPainter()),
+                    )),
+                    for (var i = 0; i < p.script.scenes.length; i++)
+                      _nodeWidget(p.script.scenes[i], i, w, h),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        _toolbar(),
+      ],
+    );
+  }
+
+  /// 节点画布坐标（x/y=-1 的旧数据按索引自动铺开）
+  double _rx(Scene sc, int i, double w) {
+    if (sc.x >= 0) return sc.x * w;
+    return (0.12 + (i * 0.23) % 0.68) * w;
+  }
+
+  double _ry(Scene sc, int i, double h) {
+    if (sc.y >= 0) return sc.y * h;
+    return (0.16 + (i * 0.19) % 0.62) * h;
+  }
+
+  Widget _nodeWidget(Scene sc, int i, double w, double h) {
+    final active = sc.id == _sel;
+    final left = (_rx(sc, i, w) - 76).clamp(4.0, w - 152);
+    final top = (_ry(sc, i, h) - 24).clamp(4.0, h - 120);
+    return Positioned(
+      left: left,
+      top: top,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _sel = sc.id),
+            onPanStart: (_) => _dragStart = (sc.x, sc.y),
+            onPanUpdate: (d) {
+              final base = _dragStart ?? (sc.x, sc.y);
+              _mutate(() {
+                sc.x = (base.$1 + d.delta.dx / w).clamp(0.03, 0.97);
+                sc.y = (base.$2 + d.delta.dy / h).clamp(0.03, 0.97);
+              });
+            },
+            onPanEnd: (_) => _dragStart = null,
+            child: Container(
+              width: 152,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              decoration: BoxDecoration(
+                color: active
+                    ? const Color(0xFF3D4A9E)
+                    : const Color(0xFF3A3A42),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: active ? const Color(0xFFFFC24B) : Colors.white24,
+                  width: active ? 2 : 1,
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                      color: Colors.black38,
+                      blurRadius: 6,
+                      offset: Offset(0, 2)),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    sc.name.isEmpty ? sc.id : sc.name,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${sc.dialogue.length} 句 · ${sc.choices.length} 选项',
+                    style:
+                        const TextStyle(fontSize: 10, color: Colors.white54),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          if (sc.dialogue.isNotEmpty)
+            _contentChip('📄 剧情 ×${sc.dialogue.length}',
+                const Color(0xFF3A6FB0), () => _editStory(sc)),
+          if (sc.cgs.isNotEmpty)
+            _contentChip('🖼 CG ×${sc.cgs.length}', const Color(0xFF8A4FA8),
+                () => _editCgs(sc)),
+          if (sc.bgms.isNotEmpty)
+            _contentChip('🎵 BGM ×${sc.bgms.length}',
+                const Color(0xFF2E8B67), () => _editBgms(sc)),
+        ],
+      ),
+    );
+  }
+
+  Widget _contentChip(String label, Color color, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 120,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Text(label,
+              textAlign: TextAlign.center,
+              style:
+                  const TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
+        ),
+      ),
+    );
+  }
+
+  Widget _toolbar() {
+    final sc = _current();
+    return Container(
+      color: const Color(0xFF1C1C22),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: SafeArea(
+        top: false,
+        child: sc == null
+            ? Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: _openProjectSettings,
+                      child: const Text(
+                        '点空白处创建节点 · 拖动节点移动\n点节点选中，用工具添加内容（点这里改作品标题/简介）',
+                        style: TextStyle(fontSize: 12, color: Colors.white54),
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.settings_outlined, size: 20),
+                    tooltip: '作品设置',
+                    onPressed: _openProjectSettings,
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  _toolBtn(Icons.chat_bubble_outline, '剧情内容',
+                      () => _addStoryLine(sc)),
+                  const SizedBox(width: 6),
+                  _toolBtn(Icons.image_outlined, 'CG', () => _addCgTo(sc)),
+                  const SizedBox(width: 6),
+                  _toolBtn(Icons.music_note_outlined, 'BGM',
+                      () => _addBgmTo(sc)),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                    tooltip: '重命名节点',
+                    onPressed: () => _renameScene(sc),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline,
+                        size: 20, color: Colors.redAccent),
+                    tooltip: '删除节点',
+                    onPressed: _delScene,
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _toolBtn(IconData icon, String label, VoidCallback onTap) {
+    return FilledButton.tonalIcon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 18),
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      style: FilledButton.styleFrom(
+          visualDensity: VisualDensity.compact,
+          padding: const EdgeInsets.symmetric(horizontal: 10)),
+    );
+  }
+
+  // ---------- 作品设置 / 节点内容 ----------
+  void _openProjectSettings() {
+    final p = _p;
+    if (p == null) return;
+    final titleCtrl = TextEditingController(text: p.title);
+    final sumCtrl = TextEditingController(text: p.script.summary);
+    showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('作品设置'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+                controller: titleCtrl,
+                decoration: const InputDecoration(labelText: '作品标题')),
+            const SizedBox(height: 8),
+            TextField(
+                controller: sumCtrl,
+                minLines: 2,
+                maxLines: 4,
+                decoration: const InputDecoration(labelText: '简介')),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c), child: const Text('取消')),
+          FilledButton(
+              onPressed: () {
+                _setTitle(titleCtrl.text.trim());
+                _setSummary(sumCtrl.text.trim());
+                Navigator.pop(c);
+              },
+              child: const Text('保存')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _addCgTo(Scene sc) async {
+    final names = _imageNames();
+    if (names.isEmpty) {
+      _toast('还没有图片资产，请先到「🎨 资产」页上传');
+      return;
+    }
+    final picked = await _pickAssetDialog('选择 CG 图片', names);
+    if (picked == null || !mounted) return;
+    _mutate(() {
+      if (!sc.cgs.contains(picked)) sc.cgs.add(picked);
+    });
+  }
+
+  Future<void> _addBgmTo(Scene sc) async {
+    final names = _bgmNames();
+    if (names.isEmpty) {
+      _toast('还没有音乐资产，请先到「🎨 资产」页上传');
+      return;
+    }
+    final picked = await _pickAssetDialog('选择 BGM 音乐', names);
+    if (picked == null || !mounted) return;
+    _mutate(() {
+      if (!sc.bgms.contains(picked)) sc.bgms.add(picked);
+    });
+  }
+
+  Future<String?> _pickAssetDialog(String title, List<String> names) {
+    return showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: names.length,
+            itemBuilder: (c, i) => ListTile(
+              dense: true,
+              leading: const Icon(Icons.attach_file, size: 18),
+              title: Text(names[i],
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              onTap: () => Navigator.pop(c, names[i]),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c), child: const Text('取消')),
+        ],
+      ),
+    );
+  }
+
+  void _editStory(Scene sc) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF232329),
+      builder: (c) => StatefulBuilder(
+        builder: (c, setSheet) {
+          final charNames = _p!.characters.map((e) => e.name).toList();
+          final images = _imageNames();
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.82,
+            maxChildSize: 0.95,
+            builder: (c, scrollCtrl) => ListView(
+              controller: scrollCtrl,
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              children: [
+                Row(
                   children: [
                     const Expanded(
-                        child: Text('场景',
-                            style: TextStyle(fontWeight: FontWeight.bold))),
+                        child: Text('📄 剧情内容',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold))),
                     IconButton(
-                      icon: const Icon(Icons.add_circle_outline, size: 20),
-                      tooltip: '添加场景',
-                      onPressed: _addScene,
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.pop(c)),
+                  ],
+                ),
+                Text('节点：${sc.name}',
+                    style:
+                        const TextStyle(fontSize: 12, color: Colors.white54)),
+                const SizedBox(height: 8),
+                FilledButton.tonalIcon(
+                  onPressed: () {
+                    _mutate(() => sc.dialogue.add(Line()));
+                    setSheet(() {});
+                  },
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('添加台词'),
+                ),
+                const SizedBox(height: 8),
+                for (var i = 0; i < sc.dialogue.length; i++)
+                  _storyRow(c, setSheet, sc, i, charNames, images),
+                const Divider(height: 28),
+                Row(
+                  children: [
+                    const Expanded(
+                        child: Text('🔀 选项分支',
+                            style: TextStyle(
+                                fontSize: 15, fontWeight: FontWeight.bold))),
+                    TextButton.icon(
+                      onPressed: () {
+                        _mutate(() => sc.choices.add(Choice()));
+                        setSheet(() {});
+                      },
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('添加选项'),
                     ),
                   ],
                 ),
-              ),
+                if (sc.choices.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Text('（无选项：台词结束后自动进入「下一场景」）',
+                        style: TextStyle(fontSize: 12, color: Colors.white54)),
+                  ),
+                for (var i = 0; i < sc.choices.length; i++)
+                  _choiceRow(c, setSheet, sc, i),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _storyRow(BuildContext c, StateSetter setSheet, Scene sc, int i,
+      List<String> charNames, List<String> images) {
+    final ln = sc.dialogue[i];
+    final spk = ln.speaker.isEmpty ? '（旁白）' : ln.speaker;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      color: const Color(0xFF2E2E36),
+      child: InkWell(
+        onTap: () => _editLineDialog(c, setSheet, sc, i, charNames, images),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+          child: Row(
+            children: [
+              Text('#${i + 1}',
+                  style: const TextStyle(fontSize: 11, color: Colors.white38)),
+              const SizedBox(width: 8),
               Expanded(
-                child: ListView.builder(
-                  itemCount: p.script.scenes.length,
-                  itemBuilder: (c, i) {
-                    final sc = p.script.scenes[i];
-                    final active = sc.id == _sel;
-                    return Card(
-                      color: active ? Colors.indigo.shade800 : null,
-                      margin: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 3),
-                      child: InkWell(
-                        onTap: () => setState(() => _sel = sc.id),
-                        child: Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(sc.name.isEmpty ? sc.id : sc.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(fontSize: 13)),
-                              Text(
-                                  '${sc.dialogue.length} 句 · ${sc.choices.length} 选项',
-                                  style: const TextStyle(
-                                      fontSize: 11, color: Colors.white54)),
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      iconSize: 16,
-                                      icon: const Icon(Icons.arrow_upward),
-                                      onPressed: () => _moveScene(-1)),
-                                  IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      iconSize: 16,
-                                      icon: const Icon(Icons.arrow_downward),
-                                      onPressed: () => _moveScene(1)),
-                                  IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      iconSize: 16,
-                                      icon: const Icon(Icons.delete_outline,
-                                          color: Colors.redAccent),
-                                      onPressed: _delScene),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  },
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(spk,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.lightBlueAccent,
+                            fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(ln.text.isEmpty ? '（空台词）' : ln.text,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13)),
+                    if (ln.cg.isNotEmpty)
+                      Text('🖼 ${ln.cg}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.white38)),
+                  ],
                 ),
               ),
+              _miniBtn(Icons.arrow_upward, () {
+                _moveLine(sc, i, -1);
+                setSheet(() {});
+              }),
+              _miniBtn(Icons.arrow_downward, () {
+                _moveLine(sc, i, 1);
+                setSheet(() {});
+              }),
+              _miniBtn(Icons.delete_outline, () {
+                _delLine(sc, i);
+                setSheet(() {});
+              }, red: true),
             ],
           ),
         ),
-        const VerticalDivider(width: 1, color: Colors.white12),
-        Expanded(child: _buildScenePanel()),
-      ],
+      ),
     );
   }
 
-  Widget _buildScenePanel() {
-    final sc = _current();
-    if (sc == null) {
-      return const Center(
-          child: Text('没有场景，点左侧 ＋ 添加',
-              style: TextStyle(color: Colors.white54)));
-    }
-    final images = _imageNames();
-    final bgms = _bgmNames();
-    final p = _p!;
-    return ListView(
-      key: ValueKey('scene_form_$_formEpoch'),
-      padding: const EdgeInsets.all(12),
-      children: [
-        _SyncField(
-          decoration: const InputDecoration(labelText: '作品标题'),
-          value: p.title,
-          onChanged: _setTitle,
-        ),
-        const SizedBox(height: 8),
-        _SyncField(
-          decoration: const InputDecoration(labelText: '简介'),
-          value: p.script.summary,
-          onChanged: _setSummary,
-        ),
-        const Divider(height: 24),
-        _SyncField(
-          key: ValueKey('sc_${sc.id}_name'),
-          decoration: const InputDecoration(labelText: '场景名称'),
-          value: sc.name,
-          onChanged: (v) => _setScene('name', v),
-        ),
-        _dd('背景画面（图片）', images, sc.bg, (v) => _setScene('bg', v ?? ''),
-            key: ValueKey('sc_${sc.id}_bg')),
-        if (sc.bgHint.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Text('🎨 AI 建议背景：${sc.bgHint}',
-                style: const TextStyle(fontSize: 12, color: Colors.white54)),
-          ),
-        _dd('BGM（音乐）', bgms, sc.bgm, (v) => _setScene('bgm', v ?? ''),
-            key: ValueKey('sc_${sc.id}_bgm')),
-        if (sc.bgmHint.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Text('🎵 AI 建议 BGM：${sc.bgmHint}',
-                style: const TextStyle(fontSize: 12, color: Colors.white54)),
-          ),
-        Row(
-          children: [
-            const Text('BGM 音量', style: TextStyle(fontSize: 13)),
-            Expanded(
-              child: Slider(
-                value: sc.bgmVolume.clamp(0.0, 1.0),
-                onChanged: (v) => _setScene('bgm_volume', v),
-              ),
-            ),
-            Text('${(sc.bgmVolume * 100).round()}%',
-                style: const TextStyle(fontSize: 12)),
-          ],
-        ),
-        const Divider(height: 24),
-        Row(
-          children: [
-            const Expanded(
-                child: Text('台词',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
-            TextButton.icon(
-              onPressed: _addLine,
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('添加台词'),
-            ),
-          ],
-        ),
-        for (var i = 0; i < sc.dialogue.length; i++) _lineCard(sc, i, images),
-        const Divider(height: 24),
-        Row(
-          children: [
-            const Expanded(
-                child: Text('选项分支',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
-            TextButton.icon(
-              onPressed: _addChoice,
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('添加选项'),
-            ),
-          ],
-        ),
-        if (sc.choices.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 8),
-            child: Text('（无选项，台词结束后将自动进入「下一场景」）',
-                style: TextStyle(fontSize: 12, color: Colors.white54)),
-          ),
-        for (var i = 0; i < sc.choices.length; i++) _choiceCard(sc, i),
-        const Divider(height: 24),
-        const Text('台词结束后的走向',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-        const SizedBox(height: 6),
-        _dd('下一场景', p.script.scenes.map((s) => s.id).toList(), sc.next,
-            (v) => _setScene('next', v ?? ''),
-            showEnd: true, key: ValueKey('sc_${sc.id}_next')),
-        const SizedBox(height: 24),
-      ],
+  Widget _miniBtn(IconData icon, VoidCallback onTap, {bool red = false}) {
+    return IconButton(
+      visualDensity: VisualDensity.compact,
+      iconSize: 17,
+      icon: Icon(icon, color: red ? Colors.redAccent : Colors.white70),
+      onPressed: onTap,
     );
   }
 
-  Widget _lineCard(Scene sc, int i, List<String> images) {
+  Future<void> _editLineDialog(BuildContext c, StateSetter setSheet, Scene sc,
+      int i, List<String> charNames, List<String> images) async {
     final ln = sc.dialogue[i];
-    final p = _p!;
-    final charNames = p.characters.map((c) => c.name).toList();
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+    final textCtrl = TextEditingController(text: ln.text);
+    String speaker = ln.speaker;
+    String cg = ln.cg;
+    await showDialog<void>(
+      context: c,
+      builder: (dc) => StatefulBuilder(
+        builder: (dc, setD) => AlertDialog(
+          title: const Text('编辑台词'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('#${i + 1}',
-                    style: const TextStyle(fontSize: 11, color: Colors.white38)),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _dd('说话人（空=旁白）', charNames, ln.speaker,
-                      (v) => _setLine(i, 'speaker', v ?? ''),
-                      emptyLabel: '（旁白）', extraValue: ln.speaker,
-                      key: ValueKey('sc_${sc.id}_spk_$i')),
+                _dd('说话人（空=旁白）', charNames, speaker, (v) {
+                  speaker = v ?? '';
+                }, emptyLabel: '（旁白）',
+                    extraValue: speaker, key: const ValueKey('d_spk')),
+                TextField(
+                  controller: textCtrl,
+                  minLines: 2,
+                  maxLines: 5,
+                  decoration: const InputDecoration(labelText: '台词内容'),
                 ),
-                IconButton(
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    icon: const Icon(Icons.arrow_upward),
-                    onPressed: () => _moveLine(i, -1)),
-                IconButton(
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    icon: const Icon(Icons.arrow_downward),
-                    onPressed: () => _moveLine(i, 1)),
-                IconButton(
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    icon: const Icon(Icons.delete_outline,
-                        color: Colors.redAccent),
-                    onPressed: () => _delLine(i)),
+                const SizedBox(height: 8),
+                _dd('本句 CG（可选）', images, cg, (v) {
+                  cg = v ?? '';
+                }, extraValue: cg, key: const ValueKey('d_cg')),
+                if (ln.cgHint.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text('🖼 AI 建议 CG：${ln.cgHint}',
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.white54)),
+                  ),
               ],
             ),
-            _dd('本句 CG（可选）', images, ln.cg,
-                (v) => _setLine(i, 'cg', v ?? ''),
-                key: ValueKey('sc_${sc.id}_cg_$i')),
-            _SyncField(
-              key: ValueKey('sc_${sc.id}_ln_$i'),
-              minLines: 1,
-              maxLines: 4,
-              decoration: const InputDecoration(hintText: '台词内容……'),
-              value: ln.text,
-              onChanged: (v) => _setLine(i, 'text', v),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dc),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () {
+                _mutate(() {
+                  ln.speaker = speaker;
+                  ln.text = textCtrl.text.trim();
+                  ln.cg = cg;
+                });
+                setSheet(() {});
+                Navigator.pop(dc);
+              },
+              child: const Text('保存'),
             ),
-            if (ln.cgHint.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('🖼 AI 建议 CG：${ln.cgHint}',
-                    style:
-                        const TextStyle(fontSize: 12, color: Colors.white54)),
-              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _choiceCard(Scene sc, int i) {
+  Widget _choiceRow(BuildContext c, StateSetter setSheet, Scene sc, int i) {
     final ch = sc.choices[i];
-    final p = _p!;
     return Card(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: 6),
+      color: const Color(0xFF2E2E36),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        padding: const EdgeInsets.fromLTRB(10, 6, 4, 6),
+        child: Row(
           children: [
-            Row(
-              children: [
-                const Text('选项',
-                    style: TextStyle(fontSize: 12, color: Colors.white38)),
-                IconButton(
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    icon: const Icon(Icons.arrow_upward),
-                    onPressed: () => _moveChoice(i, -1)),
-                IconButton(
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    icon: const Icon(Icons.arrow_downward),
-                    onPressed: () => _moveChoice(i, 1)),
-                IconButton(
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    icon: const Icon(Icons.delete_outline,
-                        color: Colors.redAccent),
-                    onPressed: () => _delChoice(i)),
-              ],
+            const Icon(Icons.fork_right, size: 16, color: Colors.white38),
+            const SizedBox(width: 8),
+            Expanded(
+              child: GestureDetector(
+                onTap: () => _editChoiceDialog(c, setSheet, sc, i),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(ch.text.isEmpty ? '（空选项）' : ch.text,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13)),
+                    Text(_nextLabel(ch.next),
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.white38)),
+                  ],
+                ),
+              ),
             ),
-            _SyncField(
-              key: ValueKey('sc_${sc.id}_ch_$i'),
-              decoration: const InputDecoration(hintText: '选项文字'),
-              value: ch.text,
-              onChanged: (v) => _setChoice(i, 'text', v),
-            ),
-            _dd('跳转到', p.script.scenes.map((s) => s.id).toList(), ch.next,
-                (v) => _setChoice(i, 'next', v ?? ''), showEnd: true,
-                key: ValueKey('sc_${sc.id}_jump_$i')),
+            _miniBtn(Icons.arrow_upward, () {
+              _moveChoice(sc, i, -1);
+              setSheet(() {});
+            }),
+            _miniBtn(Icons.arrow_downward, () {
+              _moveChoice(sc, i, 1);
+              setSheet(() {});
+            }),
+            _miniBtn(Icons.delete_outline, () {
+              _delChoice(sc, i);
+              setSheet(() {});
+            }, red: true),
           ],
         ),
       ),
     );
   }
 
+  String _nextLabel(String next) {
+    if (next.isEmpty) return '→（结束）';
+    final sc = _p!.script.findScene(next);
+    return sc == null ? '→ $next' : '→ ${sc.name}';
+  }
+
+  Future<void> _editChoiceDialog(
+      BuildContext c, StateSetter setSheet, Scene sc, int i) async {
+    final ch = sc.choices[i];
+    final textCtrl = TextEditingController(text: ch.text);
+    String next = ch.next;
+    final sceneIds = _p!.script.scenes.map((s) => s.id).toList();
+    await showDialog<void>(
+      context: c,
+      builder: (dc) => StatefulBuilder(
+        builder: (dc, setD) => AlertDialog(
+          title: const Text('编辑选项'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                  controller: textCtrl,
+                  decoration: const InputDecoration(labelText: '选项文字')),
+              const SizedBox(height: 8),
+              _dd('跳转到', sceneIds, next, (v) {
+                next = v ?? '';
+              }, showEnd: true,
+                  extraValue: next, key: const ValueKey('d_next')),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dc),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () {
+                _mutate(() {
+                  ch.text = textCtrl.text.trim();
+                  ch.next = next;
+                });
+                setSheet(() {});
+                Navigator.pop(dc);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------- CG / BGM 素材面板 ----------
+  void _editCgs(Scene sc) {
+    _assetListSheet(sc, '🖼 CG 素材', sc.cgs, Icons.image_outlined,
+        '还没有 CG，点下方按钮从资产添加', () => _addCgTo(sc));
+  }
+
+  void _editBgms(Scene sc) {
+    _assetListSheet(sc, '🎵 BGM 素材', sc.bgms, Icons.music_note_outlined,
+        '还没有 BGM，点下方按钮从资产添加', () => _addBgmTo(sc));
+  }
+
+  void _assetListSheet(Scene sc, String title, List<String> list,
+      IconData icon, String emptyHint, VoidCallback add) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF232329),
+      builder: (c) => StatefulBuilder(
+        builder: (c, setSheet) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                        child: Text(title,
+                            style: const TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold))),
+                    IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.pop(c)),
+                  ],
+                ),
+                Text('节点：${sc.name}',
+                    style: const TextStyle(
+                        fontSize: 12, color: Colors.white54)),
+                const SizedBox(height: 8),
+                FilledButton.tonalIcon(
+                  onPressed: add,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('添加'),
+                ),
+                const SizedBox(height: 8),
+                if (list.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Text(emptyHint,
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.white54)),
+                  )
+                else
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 300),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: list.length,
+                      itemBuilder: (c, i) => ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(icon, size: 18),
+                        title: Text(list[i],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 13)),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _miniBtn(Icons.arrow_upward, () {
+                              _moveStr(list, i, -1);
+                              setSheet(() {});
+                            }),
+                            _miniBtn(Icons.arrow_downward, () {
+                              _moveStr(list, i, 1);
+                              setSheet(() {});
+                            }),
+                            _miniBtn(Icons.delete_outline, () {
+                              _delStr(list, i);
+                              setSheet(() {});
+                            }, red: true),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
   /// 通用下拉：空值显示 [emptyLabel]，可选 [extraValue] 保证当前值必在候选中
   /// [key] 用于在切换场景/行时强制重建 FormField 状态（initialValue 只在首次生效）
   Widget _dd(String label, List<String> values, String current,
@@ -1470,11 +1797,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _endGame();
       return;
     }
-    if (sc.bgm != _curBgm) {
-      _curBgm = sc.bgm;
+    final bgmName = sc.bgm.isNotEmpty
+        ? sc.bgm
+        : (sc.bgms.isNotEmpty ? sc.bgms.first : '');
+    if (bgmName != _curBgm) {
+      _curBgm = bgmName;
       await _bgm.stop();
-      final path = _assetPaths[sc.bgm];
-      if (sc.bgm.isNotEmpty && path != null) {
+      final path = _assetPaths[bgmName];
+      if (bgmName.isNotEmpty && path != null) {
         await _bgm.setVolume(sc.bgmVolume.clamp(0.0, 1.0));
         await _bgm.setReleaseMode(ReleaseMode.loop);
         await _bgm.play(DeviceFileSource(path));
@@ -1808,4 +2138,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
     );
   }
+}
+
+/// 画布背景点阵
+class _DotGridPainter extends CustomPainter {
+  const _DotGridPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = Colors.white.withValues(alpha: 0.06);
+    const gap = 26.0;
+    for (var x = 8.0; x < size.width; x += gap) {
+      for (var y = 8.0; y < size.height; y += gap) {
+        canvas.drawCircle(Offset(x, y), 1.2, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DotGridPainter oldDelegate) => false;
 }

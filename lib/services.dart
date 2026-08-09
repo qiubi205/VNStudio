@@ -331,6 +331,10 @@ class ExportService {
       {
         "id": "s1",
         "name": "场景名",
+        "x": 0.25,                // 画布节点位置（相对 0~1，编辑器可视化用）
+        "y": 0.35,
+        "cgs": ["cg1.png"],       // 节点挂载的 CG 素材（assets/ 下文件名，可多个）
+        "bgms": ["bgm1.mp3"],     // 节点挂载的 BGM 素材（可多个）
         "bg": "背景图文件名(assets/下, 可为空)",
         "bgm": "BGM文件名(可为空)",
         "bgm_volume": 0.8,
@@ -352,8 +356,8 @@ class ExportService {
 ## 给 Agent 的加工流程（推荐）
 1. 读取 `project.json`，校验：start_scene 存在、choices[].next 与 scenes[].next 都指向存在的场景、assets 文件名都能在 assets/ 找到。
 2. 按 `script` 生成完整游戏工程。推荐目标：**Ren'Py**（脚本可读性强、支持安卓打包）：
-   - 每个场景 → `label`；dialogue → 台词行；choices → `menu`；bg → `scene/show`；bgm → `play music`（volume 用 bgm_volume）。
-   - 素材放入 `game/images/` 与 `game/audio/`。
+   - 每个场景 → `label`；dialogue → 台词行；choices → `menu`；bg → `scene/show`；bgm → `play music`（volume 用 bgm_volume）；
+   - 节点级 `cgs`/`bgms` 列表按顺序处理（多张 CG 轮换、多首 BGM 顺序播放），素材放入 `game/images/` 与 `game/audio/`。
 3. 补齐游戏性包装（标题画面、存档、回退、结局收集等）。
 4. 打包安卓 APK（Ren'Py SDK 或 CI workflow），必要时补 UI 资源。
 5. 如素材缺失（bg/cg/bgm 为空），可用 AI 生成图片/音乐补齐，或留占位。

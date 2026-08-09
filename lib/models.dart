@@ -53,6 +53,12 @@ class Scene {
   String next;
   List<Line> dialogue;
   List<Choice> choices;
+  /// 画布节点位置（相对坐标 0~1；-1 表示未布局，加载时自动铺开）
+  double x;
+  double y;
+  /// 节点挂载的 CG / BGM 素材（assets 目录下的文件名）
+  List<String> cgs;
+  List<String> bgms;
 
   Scene({
     required this.id,
@@ -65,8 +71,14 @@ class Scene {
     this.next = '',
     List<Line>? dialogue,
     List<Choice>? choices,
+    this.x = -1,
+    this.y = -1,
+    List<String>? cgs,
+    List<String>? bgms,
   })  : dialogue = dialogue ?? [],
-        choices = choices ?? [];
+        choices = choices ?? [],
+        cgs = cgs ?? [],
+        bgms = bgms ?? [];
 
   factory Scene.fromJson(Map<String, dynamic> j) => Scene(
         id: (j['id'] as String?) ?? '',
@@ -85,6 +97,10 @@ class Scene {
                 ?.map((e) => Choice.fromJson(e as Map<String, dynamic>))
                 .toList() ??
             [],
+        x: ((j['x'] as num?)?.toDouble()) ?? -1,
+        y: ((j['y'] as num?)?.toDouble()) ?? -1,
+        cgs: (j['cgs'] as List?)?.map((e) => e.toString()).toList() ?? [],
+        bgms: (j['bgms'] as List?)?.map((e) => e.toString()).toList() ?? [],
       );
 
   Map<String, dynamic> toJson() => {
@@ -96,6 +112,10 @@ class Scene {
         'bgm_hint': bgmHint,
         'bgm_volume': bgmVolume,
         'bgm_loop': true,
+        'x': x,
+        'y': y,
+        'cgs': cgs,
+        'bgms': bgms,
         'dialogue': dialogue.map((e) => e.toJson()).toList(),
         'choices': choices.map((e) => e.toJson()).toList(),
         'next': next,
