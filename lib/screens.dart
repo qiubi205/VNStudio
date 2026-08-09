@@ -183,9 +183,19 @@ class _EditorScreenState extends State<EditorScreen> {
   List<File> _assets = [];
   int _tab = 0;
   String? _sel;
-  (double, double)? _dragStart;
   bool _busy = false;
   AudioPlayer? _preview;
+  /// 画布视口：缩放与平移（交互视图）
+  double _viewportScale = 1.0;
+  Offset _viewportOffset = Offset.zero;
+  double _scaleStartScale = 1.0;
+  Offset _scaleStartOffset = Offset.zero;
+  Offset _scaleStartFocal = Offset.zero;
+  /// 拖动中的节点（画布视口拖拽时记录）
+  String? _dragNodeId;
+  /// 链条串联模式：先点起点再点终点
+  bool _linkMode = false;
+  String? _linkFrom;
   /// 表单版本号：剧本整体替换（新建/AI 应用/加载）时自增，强制重建编辑器表单
 
   @override
@@ -522,20 +532,91 @@ class _EditorScreenState extends State<EditorScreen> {
             builder: (c, cons) {
               final w = cons.maxWidth;
               final h = cons.maxHeight;
+              // 节点中心点（旧数据 -1 按索引铺开）
+              final centers = <Offset>[
+                for (var i = 0; i < p.script.scenes.length; i++)
+                  Offset(_rx(p.script.scenes[i], i, w), _ry(p.script.scenes[i], i, h))
+              ];
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTapUp: (d) =>
-                    _addSceneAt(d.localPosition.dx / w, d.localPosition.dy / h),
-                child: Stack(
-                  children: [
-                    Positioned.fill(
-                        child: Container(
-                      color: const Color(0xFF25252B),
-                      child: const CustomPaint(painter: _DotGridPainter()),
-                    )),
-                    for (var i = 0; i < p.script.scenes.length; i++)
-                      _nodeWidget(p.script.scenes[i], i, w, h),
-                  ],
+                onTapUp: (d) {
+                  final pt = _toCanvas(d.localPosition);
+                  final hit = _hitTestNode(pt, w, h);
+                  if (hit != null) {
+                    _onNodeTap(hit);
+                  } else if (!_linkMode) {
+                    _addSceneAt(pt.dx / w, pt.dy / h);
+                  }
+                },
+                onScaleStart: (d) {
+                  _scaleStartScale = _viewportScale;
+                  _scaleStartOffset = _viewportOffset;
+                  _scaleStartFocal = d.localFocalPoint;
+                  if (d.pointerCount == 1) {
+                    final pt = _toCanvas(d.localFocalPoint);
+                    _dragNodeId = _hitTestNode(pt, w, h)?.id;
+                  }
+                },
+                onScaleUpdate: (d) {
+                  if (d.pointerCount >= 2) {
+                    // 双指缩放：保持焦点处的画布点不动
+                    final ns =
+                        (_scaleStartScale * d.scale).clamp(0.3, 3.0);
+                    final canvasAtFocal =
+                        (_scaleStartFocal - _scaleStartOffset) / _scaleStartScale;
+                    setState(() {
+                      _viewportScale = ns;
+                      _viewportOffset =
+                          d.localFocalPoint - canvasAtFocal * ns;
+                    });
+                  } else if (d.pointerCount == 1 && _dragNodeId != null) {
+                    // 单指拖动节点
+                    final sc = p.script.findScene(_dragNodeId!);
+                    if (sc != null) {
+                      final pt = _toCanvas(d.localFocalPoint);
+                      _mutate(() {
+                        sc.x = (pt.dx / w).clamp(0.03, 0.97);
+                        sc.y = (pt.dy / h).clamp(0.03, 0.97);
+                      });
+                    }
+                  } else if (d.pointerCount == 1) {
+                    // 单指拖空白：平移视口
+                    setState(() {
+                      _viewportOffset = _scaleStartOffset +
+                          (d.localFocalPoint - _scaleStartFocal);
+                    });
+                  }
+                },
+                onScaleEnd: (_) => _dragNodeId = null,
+                child: ClipRect(
+                  child: Transform(
+                    transform: Matrix4(
+                      _viewportScale, 0, 0, 0, //
+                      0, _viewportScale, 0, 0, //
+                      0, 0, 1, 0, //
+                      _viewportOffset.dx, _viewportOffset.dy, 0, 1,
+                    ),
+                    child: SizedBox(
+                      width: w,
+                      height: h,
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                              child: Container(
+                            color: const Color(0xFF25252B),
+                            child: const CustomPaint(
+                                painter: _DotGridPainter()),
+                          )),
+                          Positioned.fill(
+                              child: CustomPaint(
+                                  painter: _LinkPainter(
+                                      p.script.scenes, centers, w, h))),
+                          for (var i = 0; i < p.script.scenes.length; i++)
+                            _nodeWidget(p.script.scenes[i], i, w, h),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               );
             },
@@ -557,8 +638,52 @@ class _EditorScreenState extends State<EditorScreen> {
     return (0.16 + (i * 0.19) % 0.62) * h;
   }
 
+  /// 屏幕坐标 → 画布坐标（考虑视口缩放/平移）
+  Offset _toCanvas(Offset screen) => Offset(
+        (screen.dx - _viewportOffset.dx) / _viewportScale,
+        (screen.dy - _viewportOffset.dy) / _viewportScale,
+      );
+
+  /// 命中检测：返回被点中的节点（画布坐标）
+  Scene? _hitTestNode(Offset pt, double w, double h) {
+    final p = _p;
+    if (p == null) return null;
+    for (var i = 0; i < p.script.scenes.length; i++) {
+      final sc = p.script.scenes[i];
+      final left = (_rx(sc, i, w) - 76).clamp(4.0, w - 152);
+      final top = (_ry(sc, i, h) - 24).clamp(4.0, h - 120);
+      if (pt.dx >= left && pt.dx <= left + 152 && pt.dy >= top && pt.dy <= top + 64) {
+        return sc;
+      }
+    }
+    return null;
+  }
+
+  /// 点节点：串联模式下选起点/终点，否则选中
+  void _onNodeTap(Scene sc) {
+    if (!_linkMode) {
+      setState(() => _sel = sc.id);
+      return;
+    }
+    if (_linkFrom == null) {
+      _linkFrom = sc.id;
+      _toast('已选起点「${sc.name}」，再点一个节点作为下一场景');
+    } else if (_linkFrom == sc.id) {
+      _linkFrom = null;
+      _toast('已取消选择');
+    } else {
+      final from = _p!.script.findScene(_linkFrom!);
+      if (from != null) {
+        _mutate(() => from.next = sc.id);
+        _toast('✅ 「${from.name}」→「${sc.name}」已串联');
+      }
+      _linkFrom = null;
+    }
+  }
+
   Widget _nodeWidget(Scene sc, int i, double w, double h) {
     final active = sc.id == _sel;
+    final linking = _linkMode && sc.id == _linkFrom;
     final left = (_rx(sc, i, w) - 76).clamp(4.0, w - 152);
     final top = (_ry(sc, i, h) - 24).clamp(4.0, h - 120);
     return Positioned(
@@ -569,27 +694,20 @@ class _EditorScreenState extends State<EditorScreen> {
         children: [
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _sel = sc.id),
-            onPanStart: (_) => _dragStart = (sc.x, sc.y),
-            onPanUpdate: (d) {
-              final base = _dragStart ?? (sc.x, sc.y);
-              _mutate(() {
-                sc.x = (base.$1 + d.delta.dx / w).clamp(0.03, 0.97);
-                sc.y = (base.$2 + d.delta.dy / h).clamp(0.03, 0.97);
-              });
-            },
-            onPanEnd: (_) => _dragStart = null,
+            onTap: () => _onNodeTap(sc),
             child: Container(
               width: 152,
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
               decoration: BoxDecoration(
                 color: active
                     ? const Color(0xFF3D4A9E)
-                    : const Color(0xFF3A3A42),
+                    : (linking ? const Color(0xFF1E6B3A) : const Color(0xFF3A3A42)),
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
-                  color: active ? const Color(0xFFFFC24B) : Colors.white24,
-                  width: active ? 2 : 1,
+                  color: active
+                      ? const Color(0xFFFFC24B)
+                      : (linking ? const Color(0xFF4ADE80) : Colors.white24),
+                  width: active || linking ? 2 : 1,
                 ),
                 boxShadow: const [
                   BoxShadow(
@@ -674,6 +792,14 @@ class _EditorScreenState extends State<EditorScreen> {
                       ),
                     ),
                   ),
+                  _zoomBtn(),
+                  IconButton(
+                    icon: Icon(Icons.link,
+                        size: 20,
+                        color: _linkMode ? const Color(0xFF4ADE80) : null),
+                    tooltip: '串联模式：点两个节点设置下一场景',
+                    onPressed: _toggleLinkMode,
+                  ),
                   IconButton(
                     icon: const Icon(Icons.settings_outlined, size: 20),
                     tooltip: '作品设置',
@@ -690,7 +816,16 @@ class _EditorScreenState extends State<EditorScreen> {
                   const SizedBox(width: 6),
                   _toolBtn(Icons.music_note_outlined, 'BGM',
                       () => _addBgmTo(sc)),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    icon: Icon(Icons.link,
+                        size: 20,
+                        color: _linkMode ? const Color(0xFF4ADE80) : null),
+                    tooltip: '串联模式：点两个节点设置下一场景',
+                    onPressed: _toggleLinkMode,
+                  ),
                   const Spacer(),
+                  _zoomBtn(),
                   IconButton(
                     icon: const Icon(Icons.edit_outlined, size: 20),
                     tooltip: '重命名节点',
@@ -705,6 +840,25 @@ class _EditorScreenState extends State<EditorScreen> {
                 ],
               ),
       ),
+    );
+  }
+
+  void _toggleLinkMode() {
+    setState(() {
+      _linkMode = !_linkMode;
+      _linkFrom = null;
+    });
+    _toast(_linkMode ? '🔗 串联模式开启：依次点两个节点，前者→后者' : '已退出串联模式');
+  }
+
+  Widget _zoomBtn() {
+    return IconButton(
+      icon: const Icon(Icons.zoom_out_map, size: 20),
+      tooltip: '重置缩放（双指捏合可缩放，单指拖动空白可平移画布）',
+      onPressed: () => setState(() {
+        _viewportScale = 1.0;
+        _viewportOffset = Offset.zero;
+      }),
     );
   }
 
@@ -2164,4 +2318,108 @@ class _DotGridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _DotGridPainter oldDelegate) => false;
+}
+
+/// 场景串联连线：next 主线（金色）+ choices 分支（紫色）
+class _LinkPainter extends CustomPainter {
+  final List<Scene> scenes;
+  final List<Offset> centers;
+  const _LinkPainter(this.scenes, this.centers, this.w, this.h);
+  final double w;
+  final double h;
+
+  Offset _centerOf(Scene sc) {
+    final i = scenes.indexOf(sc);
+    if (i < 0 || i >= centers.length) return Offset.zero;
+    return centers[i];
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final sc in scenes) {
+      final a = _centerOf(sc);
+      // next 主线：金色实线箭头
+      if (sc.next.isNotEmpty) {
+        Scene? t;
+        for (final s in scenes) {
+          if (s.id == sc.next) {
+            t = s;
+            break;
+          }
+        }
+        if (t != null) {
+          _arrow(canvas, a, _centerOf(t), const Color(0xFFFFC24B), 2.5);
+        }
+      }
+      // choices 分支：紫色虚线箭头
+      for (final ch in sc.choices) {
+        if (ch.next.isNotEmpty) {
+          Scene? t;
+          for (final s in scenes) {
+            if (s.id == ch.next) {
+              t = s;
+              break;
+            }
+          }
+          if (t != null) {
+            _arrow(canvas, a, _centerOf(t), const Color(0xFFB07CD8), 2.0,
+                dashed: true);
+          }
+        }
+      }
+    }
+  }
+
+  void _arrow(Canvas canvas, Offset a, Offset b, Color color, double width,
+      {bool dashed = false}) {
+    if (a == Offset.zero || b == Offset.zero) return;
+    // 从节点边缘开始（节点宽152 高约64）
+    final dir = b - a;
+    final len = dir.distance;
+    if (len < 40) return;
+    final u = dir / len;
+    final start = a + u * 82;
+    final end = b - u * 82;
+    final mid = (start + end) / 2 + const Offset(0, -24);
+    final path = Path()
+      ..moveTo(start.dx, start.dy)
+      ..quadraticBezierTo(mid.dx, mid.dy, end.dx, end.dy);
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = width
+      ..style = PaintingStyle.stroke;
+    if (dashed) {
+      _drawDashedPath(canvas, path, paint);
+    } else {
+      canvas.drawPath(path, paint);
+    }
+    // 箭头
+    final tip = end - u * 10;
+    final arrow = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(tip.dx - u.dx * 12 + u.dy * 6, tip.dy - u.dy * 12 - u.dx * 6)
+      ..lineTo(tip.dx - u.dx * 12 - u.dy * 6, tip.dy - u.dy * 12 + u.dx * 6)
+      ..close();
+    canvas.drawPath(arrow, Paint()..color = color);
+  }
+
+  void _drawDashedPath(Canvas canvas, Path path, Paint paint) {
+    for (final metric in path.computeMetrics()) {
+      var dist = 0.0;
+      const dash = 10.0;
+      const gap = 7.0;
+      while (dist < metric.length) {
+        final end = (dist + dash).clamp(0.0, metric.length);
+        canvas.drawPath(metric.extractPath(dist, end), paint);
+        dist = end + gap;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _LinkPainter oldDelegate) =>
+      oldDelegate.scenes != scenes ||
+      oldDelegate.centers != centers ||
+      oldDelegate.w != w ||
+      oldDelegate.h != h;
 }
