@@ -592,16 +592,16 @@ class _EditorScreenState extends State<EditorScreen> {
                       },
                       onScaleUpdate: (d) {
                         if (d.pointerCount >= 2) {
-                          // 双指缩放：保持焦点处的画布点不动
+                          // 缩放语义：放大画布 = 同一屏幕中容纳更多世界，节点变小。
+                          // _viewportScale 是世界扩展倍数，实际绘制比例为 1/_viewportScale。
                           final ns =
-                              (_scaleStartScale * d.scale).clamp(0.15, 4.0);
+                              (_scaleStartScale * (1 / d.scale)).clamp(0.25, 8.0);
                           final canvasAtFocal = (_scaleStartFocal -
-                                  _scaleStartOffset) /
-                              _scaleStartScale;
+                                  _scaleStartOffset) * _scaleStartScale;
                           setState(() {
                             _viewportScale = ns;
                             _viewportOffset =
-                                d.localFocalPoint - canvasAtFocal * ns;
+                                d.localFocalPoint - canvasAtFocal / ns;
                             _clampViewport();
                           });
                         } else if (d.pointerCount == 1 &&
@@ -627,9 +627,10 @@ class _EditorScreenState extends State<EditorScreen> {
                       onScaleEnd: (_) => _dragNodeId = null,
                       child: ClipRect(
                         child: Transform(
+                          // 画布扩展倍数越大，节点在屏幕上的绘制尺寸越小。
                           transform: Matrix4(
-                            _viewportScale, 0, 0, 0, //
-                            0, _viewportScale, 0, 0, //
+                            1 / _viewportScale, 0, 0, 0, //
+                            0, 1 / _viewportScale, 0, 0, //
                             0, 0, 1, 0, //
                             _viewportOffset.dx, _viewportOffset.dy, 0, 1,
                           ),
@@ -674,7 +675,7 @@ class _EditorScreenState extends State<EditorScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            '${p.script.scenes.length} 节点 · 缩放 ${(_viewportScale * 100).round()}%'
+                            '${p.script.scenes.length} 节点 · 画布 ${(_viewportScale * 100).round()}%'
                             '${_linkMode ? (_linkKind == _LinkKind.next ? ' · 🔗主线' : ' · 🔀选项') : ''}'
                             '${_retarget != null ? ' · 🎯选目标' : ''}',
                             style: const TextStyle(
@@ -713,8 +714,8 @@ class _EditorScreenState extends State<EditorScreen> {
 
   /// 屏幕坐标 → 画布世界坐标（考虑视口缩放/平移）
   Offset _toCanvas(Offset screen) => Offset(
-        (screen.dx - _viewportOffset.dx) / _viewportScale,
-        (screen.dy - _viewportOffset.dy) / _viewportScale,
+        (screen.dx - _viewportOffset.dx) * _viewportScale,
+        (screen.dy - _viewportOffset.dy) * _viewportScale,
       );
 
   /// 命中检测：返回被点中的节点（画布世界坐标）
@@ -1200,11 +1201,13 @@ class _EditorScreenState extends State<EditorScreen> {
     const padding = 80.0;
     final contentW = math.max(240.0, maxX - minX + padding * 2);
     final contentH = math.max(180.0, maxY - minY + padding * 2);
-    final s = math.min(w / contentW, h / contentH).clamp(0.15, 4.0);
+    // 适配时让节点范围填满可视区；扩展倍数越大，节点绘制得越小。
+    final s = math.max(contentW / w, contentH / h).clamp(0.25, 8.0);
     _viewportScale = s;
+    final visual = 1 / s;
     _viewportOffset = Offset(
-      w / 2 - (minX + maxX) / 2 * s,
-      h / 2 - (minY + maxY) / 2 * s,
+      w / 2 - (minX + maxX) / 2 * visual,
+      h / 2 - (minY + maxY) / 2 * visual,
     );
     _clampViewport();
   }
@@ -1214,11 +1217,11 @@ class _EditorScreenState extends State<EditorScreen> {
     final w = _viewW, h = _viewH;
     if (w <= 0 || h <= 0) return;
     setState(() {
-      final ns = (_viewportScale * factor).clamp(0.15, 4.0);
+      final ns = (_viewportScale * factor).clamp(0.25, 8.0);
       final center = Offset(w / 2, h / 2);
-      final canvasAtCenter = (center - _viewportOffset) / _viewportScale;
+      final canvasAtCenter = (center - _viewportOffset) * _viewportScale;
       _viewportScale = ns;
-      _viewportOffset = center - canvasAtCenter * ns;
+      _viewportOffset = center - canvasAtCenter / ns;
       _clampViewport();
     });
   }
@@ -1228,8 +1231,8 @@ class _EditorScreenState extends State<EditorScreen> {
     final w = _viewW, h = _viewH;
     if (w <= 0 || h <= 0) return;
     const m = 40.0;
-    final sw = _worldW * _viewportScale;
-    final sh = _worldH * _viewportScale;
+    final sw = _worldW / _viewportScale;
+    final sh = _worldH / _viewportScale;
     double cx(double o, double worldS, double view) {
       if (worldS <= view) {
         final base = (view - worldS) / 2;
