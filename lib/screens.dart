@@ -1,6 +1,7 @@
 // VN Studio · 全部界面：首页 / 编辑器(剧本·资产·导出) / AI 生成 / 设置 / 播放器
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
@@ -320,9 +321,9 @@ class _EditorScreenState extends State<EditorScreen> {
     _editStory(sc);
   }
 
-  void _delScene() {
+  void _delScene([Scene? target]) {
     final p = _p;
-    final sc = _current();
+    final sc = target ?? _current();
     if (p == null || sc == null) return;
     showDialog<bool>(
       context: context,
@@ -951,13 +952,31 @@ class _EditorScreenState extends State<EditorScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    sc.name.isEmpty ? sc.id : sc.name,
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          sc.name.isEmpty ? sc.id : sc.name,
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          tooltip: '删除节点',
+                          icon: const Icon(Icons.delete_outline,
+                              size: 17, color: Colors.redAccent),
+                          onPressed: () => _delScene(sc),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 2),
                   Text(
@@ -1156,15 +1175,37 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  /// 视口适配：把整个世界缩放到视口内（首次打开/重置时调用）
+  /// 按节点包围范围适配视口，而不是把空的 1200x1800 世界一起缩小。
   void _fitView(double w, double h) {
     if (w <= 0 || h <= 0) return;
-    final s = ((w / _worldW) < (h / _worldH) ? (w / _worldW) : (h / _worldH)) *
-        0.92;
-    _viewportScale = s.clamp(0.15, 4.0);
+    final scenes = _p?.script.scenes ?? const <Scene>[];
+    if (scenes.isEmpty) {
+      _viewportScale = 1.0;
+      _viewportOffset = Offset.zero;
+      return;
+    }
+
+    var minX = _worldW;
+    var minY = _worldH;
+    var maxX = 0.0;
+    var maxY = 0.0;
+    for (var i = 0; i < scenes.length; i++) {
+      final x = _rx(scenes[i], i);
+      final y = _ry(scenes[i], i);
+      minX = math.min(minX, x - 90);
+      minY = math.min(minY, y - 45);
+      maxX = math.max(maxX, x + 90);
+      maxY = math.max(maxY, y + 75);
+    }
+    const padding = 80.0;
+    final contentW = math.max(240.0, maxX - minX + padding * 2);
+    final contentH = math.max(180.0, maxY - minY + padding * 2);
+    final s = math.min(w / contentW, h / contentH).clamp(0.15, 4.0);
+    _viewportScale = s;
     _viewportOffset = Offset(
-        (w - _worldW * _viewportScale) / 2,
-        (h - _worldH * _viewportScale) / 2);
+      w / 2 - (minX + maxX) / 2 * s,
+      h / 2 - (minY + maxY) / 2 * s,
+    );
     _clampViewport();
   }
 
