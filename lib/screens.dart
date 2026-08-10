@@ -565,9 +565,11 @@ class _EditorScreenState extends State<EditorScreen> {
               return Stack(
                 children: [
                   Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTapUp: (d) {
+                    child: Container(
+                      color: const Color(0xFF25252B),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTapUp: (d) {
                         final pt = _toCanvas(d.localPosition);
                         final hit = _hitTestNode(pt);
                         if (hit != null) {
@@ -577,11 +579,16 @@ class _EditorScreenState extends State<EditorScreen> {
                           if (link != null) {
                             _onLinkTap(link);
                           } else if (!_linkMode && _retarget == null) {
-                            _addSceneAt(pt.dx / _worldW, pt.dy / _worldH);
+                              if (pt.dx >= 0 &&
+                                pt.dx <= _worldW &&
+                                pt.dy >= 0 &&
+                                pt.dy <= _worldH) {
+                              _addSceneAt(pt.dx / _worldW, pt.dy / _worldH);
+                            }
                           }
                         }
                       },
-                      onScaleStart: (d) {
+                        onScaleStart: (d) {
                         _scaleStartScale = _viewportScale;
                         _scaleStartOffset = _viewportOffset;
                         _scaleStartFocal = d.localFocalPoint;
@@ -590,7 +597,7 @@ class _EditorScreenState extends State<EditorScreen> {
                           _dragNodeId = _hitTestNode(pt)?.id;
                         }
                       },
-                      onScaleUpdate: (d) {
+                        onScaleUpdate: (d) {
                         if (d.pointerCount >= 2) {
                           // 缩放语义：放大画布 = 同一屏幕中容纳更多世界，节点变小。
                           // _viewportScale 是世界扩展倍数，实际绘制比例为 1/_viewportScale。
@@ -624,9 +631,9 @@ class _EditorScreenState extends State<EditorScreen> {
                           });
                         }
                       },
-                      onScaleEnd: (_) => _dragNodeId = null,
-                      child: ClipRect(
-                        child: Transform(
+                        onScaleEnd: (_) => _dragNodeId = null,
+                        child: ClipRect(
+                          child: Transform(
                           // 画布扩展倍数越大，节点在屏幕上的绘制尺寸越小。
                           transform: Matrix4(
                             1 / _viewportScale, 0, 0, 0, //
@@ -639,12 +646,9 @@ class _EditorScreenState extends State<EditorScreen> {
                             height: _worldH,
                             child: Stack(
                               children: [
-                                Positioned.fill(
-                                    child: Container(
-                                  color: const Color(0xFF25252B),
-                                  child: const CustomPaint(
-                                      painter: _DotGridPainter()),
-                                )),
+                                const Positioned.fill(
+                                    child: CustomPaint(
+                                        painter: _DotGridPainter())),
                                 Positioned.fill(
                                     child: CustomPaint(
                                         painter: _LinkPainter(
@@ -656,6 +660,7 @@ class _EditorScreenState extends State<EditorScreen> {
                                   _nodeWidget(p.script.scenes[i], i),
                               ],
                             ),
+                          ),
                           ),
                         ),
                       ),
