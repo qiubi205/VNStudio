@@ -193,9 +193,25 @@ class _EditorScreenState extends State<EditorScreen> {
   Offset _scaleStartFocal = Offset.zero;
   /// 拖动中的节点（画布视口拖拽时记录）
   String? _dragNodeId;
-  /// 链条串联模式：先点起点再点终点
+  /// 画布世界尺寸（节点坐标 = x/y × 世界尺寸；缩放/平移只是视口变换，世界不变）
+  static const double _worldW = 1200;
+  static const double _worldH = 1800;
+  /// 最近一次画布视口尺寸（缩放锚点计算用）
+  double _viewW = 0;
+  double _viewH = 0;
+  /// 首次布局时自动把整个世界适配进屏幕
+  bool _viewInit = false;
+  /// 串联模式：先点起点再点终点（_linkKind 决定主线还是选项分支）
   bool _linkMode = false;
   String? _linkFrom;
+  /// 串联类型：主线（next）/ 选项分支（choices）
+  _LinkKind _linkKind = _LinkKind.next;
+  /// 选项分支模式：起点确认后暂存选项文字
+  String? _pendingChoiceText;
+  /// 画布重设目标模式（点目标节点完成）
+  _Retarget? _retarget;
+  /// 当前选中的连线（画布高亮）
+  _LinkKey? _selLink;
   /// 表单版本号：剧本整体替换（新建/AI 应用/加载）时自增，强制重建编辑器表单
 
   @override
@@ -326,6 +342,7 @@ class _EditorScreenState extends State<EditorScreen> {
       if (ok != true || !mounted) return;
       _mutate(() {
         p.script.scenes.removeWhere((s) => s.id == sc.id);
+        _selLink = null;
         for (final s in p.script.scenes) {
           if (s.next == sc.id) s.next = '';
           for (final ch in s.choices) {
@@ -532,160 +549,375 @@ class _EditorScreenState extends State<EditorScreen> {
             builder: (c, cons) {
               final w = cons.maxWidth;
               final h = cons.maxHeight;
-              // 节点中心点（旧数据 -1 按索引铺开）
+              _viewW = w;
+              _viewH = h;
+              // 首次布局：把整个世界适配进屏幕，保证节点再多也能全景查看
+              if (!_viewInit) {
+                _viewInit = true;
+                _fitView(w, h);
+              }
+              // 节点中心点（画布世界坐标；旧数据 x/y=-1 按索引铺开）
               final centers = <Offset>[
                 for (var i = 0; i < p.script.scenes.length; i++)
-                  Offset(_rx(p.script.scenes[i], i, w), _ry(p.script.scenes[i], i, h))
+                  Offset(_rx(p.script.scenes[i], i), _ry(p.script.scenes[i], i))
               ];
-              return GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTapUp: (d) {
-                  final pt = _toCanvas(d.localPosition);
-                  final hit = _hitTestNode(pt, w, h);
-                  if (hit != null) {
-                    _onNodeTap(hit);
-                  } else if (!_linkMode) {
-                    _addSceneAt(pt.dx / w, pt.dy / h);
-                  }
-                },
-                onScaleStart: (d) {
-                  _scaleStartScale = _viewportScale;
-                  _scaleStartOffset = _viewportOffset;
-                  _scaleStartFocal = d.localFocalPoint;
-                  if (d.pointerCount == 1) {
-                    final pt = _toCanvas(d.localFocalPoint);
-                    _dragNodeId = _hitTestNode(pt, w, h)?.id;
-                  }
-                },
-                onScaleUpdate: (d) {
-                  if (d.pointerCount >= 2) {
-                    // 双指缩放：保持焦点处的画布点不动
-                    final ns =
-                        (_scaleStartScale * d.scale).clamp(0.3, 3.0);
-                    final canvasAtFocal =
-                        (_scaleStartFocal - _scaleStartOffset) / _scaleStartScale;
-                    setState(() {
-                      _viewportScale = ns;
-                      _viewportOffset =
-                          d.localFocalPoint - canvasAtFocal * ns;
-                    });
-                  } else if (d.pointerCount == 1 && _dragNodeId != null) {
-                    // 单指拖动节点
-                    final sc = p.script.findScene(_dragNodeId!);
-                    if (sc != null) {
-                      final pt = _toCanvas(d.localFocalPoint);
-                      _mutate(() {
-                        sc.x = (pt.dx / w).clamp(0.03, 0.97);
-                        sc.y = (pt.dy / h).clamp(0.03, 0.97);
-                      });
-                    }
-                  } else if (d.pointerCount == 1) {
-                    // 单指拖空白：平移视口
-                    setState(() {
-                      _viewportOffset = _scaleStartOffset +
-                          (d.localFocalPoint - _scaleStartFocal);
-                    });
-                  }
-                },
-                onScaleEnd: (_) => _dragNodeId = null,
-                child: ClipRect(
-                  child: Transform(
-                    transform: Matrix4(
-                      _viewportScale, 0, 0, 0, //
-                      0, _viewportScale, 0, 0, //
-                      0, 0, 1, 0, //
-                      _viewportOffset.dx, _viewportOffset.dy, 0, 1,
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapUp: (d) {
+                        final pt = _toCanvas(d.localPosition);
+                        final hit = _hitTestNode(pt);
+                        if (hit != null) {
+                          _onNodeTap(hit);
+                        } else {
+                          final link = _hitTestLink(pt);
+                          if (link != null) {
+                            _onLinkTap(link);
+                          } else if (!_linkMode && _retarget == null) {
+                            _addSceneAt(pt.dx / _worldW, pt.dy / _worldH);
+                          }
+                        }
+                      },
+                      onScaleStart: (d) {
+                        _scaleStartScale = _viewportScale;
+                        _scaleStartOffset = _viewportOffset;
+                        _scaleStartFocal = d.localFocalPoint;
+                        if (d.pointerCount == 1) {
+                          final pt = _toCanvas(d.localFocalPoint);
+                          _dragNodeId = _hitTestNode(pt)?.id;
+                        }
+                      },
+                      onScaleUpdate: (d) {
+                        if (d.pointerCount >= 2) {
+                          // 双指缩放：保持焦点处的画布点不动
+                          final ns =
+                              (_scaleStartScale * d.scale).clamp(0.15, 4.0);
+                          final canvasAtFocal = (_scaleStartFocal -
+                                  _scaleStartOffset) /
+                              _scaleStartScale;
+                          setState(() {
+                            _viewportScale = ns;
+                            _viewportOffset =
+                                d.localFocalPoint - canvasAtFocal * ns;
+                            _clampViewport();
+                          });
+                        } else if (d.pointerCount == 1 &&
+                            _dragNodeId != null) {
+                          // 单指拖动节点（世界坐标）
+                          final sc = p.script.findScene(_dragNodeId!);
+                          if (sc != null) {
+                            final pt = _toCanvas(d.localFocalPoint);
+                            _mutate(() {
+                              sc.x = (pt.dx / _worldW).clamp(0.01, 0.99);
+                              sc.y = (pt.dy / _worldH).clamp(0.01, 0.99);
+                            });
+                          }
+                        } else if (d.pointerCount == 1) {
+                          // 单指拖空白：平移视口
+                          setState(() {
+                            _viewportOffset = _scaleStartOffset +
+                                (d.localFocalPoint - _scaleStartFocal);
+                            _clampViewport();
+                          });
+                        }
+                      },
+                      onScaleEnd: (_) => _dragNodeId = null,
+                      child: ClipRect(
+                        child: Transform(
+                          transform: Matrix4(
+                            _viewportScale, 0, 0, 0, //
+                            0, _viewportScale, 0, 0, //
+                            0, 0, 1, 0, //
+                            _viewportOffset.dx, _viewportOffset.dy, 0, 1,
+                          ),
+                          child: SizedBox(
+                            width: _worldW,
+                            height: _worldH,
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                    child: Container(
+                                  color: const Color(0xFF25252B),
+                                  child: const CustomPaint(
+                                      painter: _DotGridPainter()),
+                                )),
+                                Positioned.fill(
+                                    child: CustomPaint(
+                                        painter: _LinkPainter(
+                                            p.script.scenes, centers,
+                                            _selLink))),
+                                for (var i = 0;
+                                    i < p.script.scenes.length;
+                                    i++)
+                                  _nodeWidget(p.script.scenes[i], i),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                    child: SizedBox(
-                      width: w,
-                      height: h,
-                      child: Stack(
+                  ),
+                  // 画布信息角标：节点数 / 缩放百分比 + 缩放按钮（+/−/适配）
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: Container(
+                      padding: const EdgeInsets.only(left: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.black45,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Positioned.fill(
-                              child: Container(
-                            color: const Color(0xFF25252B),
-                            child: const CustomPaint(
-                                painter: _DotGridPainter()),
-                          )),
-                          Positioned.fill(
-                              child: CustomPaint(
-                                  painter: _LinkPainter(
-                                      p.script.scenes, centers, w, h))),
-                          for (var i = 0; i < p.script.scenes.length; i++)
-                            _nodeWidget(p.script.scenes[i], i, w, h),
+                          Text(
+                            '${p.script.scenes.length} 节点 · 缩放 ${(_viewportScale * 100).round()}%'
+                            '${_linkMode ? (_linkKind == _LinkKind.next ? ' · 🔗主线' : ' · 🔀选项') : ''}'
+                            '${_retarget != null ? ' · 🎯选目标' : ''}',
+                            style: const TextStyle(
+                                fontSize: 10, color: Colors.white70),
+                          ),
+                          _cornerBtn(Icons.zoom_out, '缩小', () => _zoomBy(0.8)),
+                          _cornerBtn(
+                              Icons.zoom_in, '放大', () => _zoomBy(1.25)),
+                          _cornerBtn(
+                              Icons.fit_screen, '适配全部节点', _fitBtn),
                         ],
                       ),
                     ),
                   ),
-                ),
+                ],
               );
             },
           ),
         ),
+        if (_linkMode || _retarget != null) _modeBanner(),
         _toolbar(),
       ],
     );
   }
 
-  /// 节点画布坐标（x/y=-1 的旧数据按索引自动铺开）
-  double _rx(Scene sc, int i, double w) {
-    if (sc.x >= 0) return sc.x * w;
-    return (0.12 + (i * 0.23) % 0.68) * w;
+  /// 节点画布坐标（x/y=-1 的旧数据按索引自动铺开；单位：世界坐标）
+  double _rx(Scene sc, int i) {
+    if (sc.x >= 0) return sc.x * _worldW;
+    return (0.12 + (i * 0.23) % 0.68) * _worldW;
   }
 
-  double _ry(Scene sc, int i, double h) {
-    if (sc.y >= 0) return sc.y * h;
-    return (0.16 + (i * 0.19) % 0.62) * h;
+  double _ry(Scene sc, int i) {
+    if (sc.y >= 0) return sc.y * _worldH;
+    return (0.16 + (i * 0.19) % 0.62) * _worldH;
   }
 
-  /// 屏幕坐标 → 画布坐标（考虑视口缩放/平移）
+  /// 屏幕坐标 → 画布世界坐标（考虑视口缩放/平移）
   Offset _toCanvas(Offset screen) => Offset(
         (screen.dx - _viewportOffset.dx) / _viewportScale,
         (screen.dy - _viewportOffset.dy) / _viewportScale,
       );
 
-  /// 命中检测：返回被点中的节点（画布坐标）
-  Scene? _hitTestNode(Offset pt, double w, double h) {
+  /// 命中检测：返回被点中的节点（画布世界坐标）
+  Scene? _hitTestNode(Offset pt) {
     final p = _p;
     if (p == null) return null;
     for (var i = 0; i < p.script.scenes.length; i++) {
       final sc = p.script.scenes[i];
-      final left = (_rx(sc, i, w) - 76).clamp(4.0, w - 152);
-      final top = (_ry(sc, i, h) - 24).clamp(4.0, h - 120);
-      if (pt.dx >= left && pt.dx <= left + 152 && pt.dy >= top && pt.dy <= top + 64) {
+      final left = (_rx(sc, i) - 76).clamp(4.0, _worldW - 152);
+      final top = (_ry(sc, i) - 24).clamp(4.0, _worldH - 120);
+      if (pt.dx >= left &&
+          pt.dx <= left + 152 &&
+          pt.dy >= top &&
+          pt.dy <= top + 64) {
         return sc;
       }
     }
     return null;
   }
 
-  /// 点节点：串联模式下选起点/终点，否则选中
+  /// 连线命中检测：返回命中的链接（画布世界坐标）
+  _LinkKey? _hitTestLink(Offset pt) {
+    final p = _p;
+    if (p == null) return null;
+    const threshold = 14.0;
+    _LinkKey? best;
+    var bestDist = threshold;
+    for (final sc in p.script.scenes) {
+      final a = Offset(
+          _rx(sc, p.script.scenes.indexOf(sc)),
+          _ry(sc, p.script.scenes.indexOf(sc)));
+      if (sc.next.isNotEmpty) {
+        final t = p.script.findScene(sc.next);
+        if (t != null) {
+          final b = Offset(
+              _rx(t, p.script.scenes.indexOf(t)),
+              _ry(t, p.script.scenes.indexOf(t)));
+          final d = _distToLink(a, b, pt);
+          if (d < bestDist) {
+            bestDist = d;
+            best = _LinkKey(sc.id, false, 0);
+          }
+        }
+      }
+      for (var i = 0; i < sc.choices.length; i++) {
+        final ch = sc.choices[i];
+        if (ch.next.isEmpty) continue;
+        final t = p.script.findScene(ch.next);
+        if (t == null) continue;
+        final b = Offset(
+            _rx(t, p.script.scenes.indexOf(t)),
+            _ry(t, p.script.scenes.indexOf(t)));
+        final d = _distToLink(a, b, pt);
+        if (d < bestDist) {
+          bestDist = d;
+          best = _LinkKey(sc.id, true, i);
+        }
+      }
+    }
+    return best;
+  }
+
+  /// 点到连线路径的距离（沿路径采样）
+  double _distToLink(Offset a, Offset b, Offset pt) {
+    final path = linkPath(a, b);
+    var best = double.infinity;
+    for (final m in path.computeMetrics()) {
+      final len = m.length;
+      for (var d = 0.0; d <= len; d += 3.0) {
+        final t = m.getTangentForOffset(d);
+        if (t == null) continue;
+        final dist = (t.position - pt).distance;
+        if (dist < best) best = dist;
+      }
+    }
+    return best;
+  }
+
+  /// 点节点：串联/重设目标模式下选源或目标，否则选中
   void _onNodeTap(Scene sc) {
-    if (!_linkMode) {
-      setState(() => _sel = sc.id);
+    final r = _retarget;
+    if (r != null) {
+      final src = _p!.script.findScene(r.sourceId);
+      if (src != null) {
+        if (r.choiceIndex < 0) {
+          _mutate(() => src.next = sc.id);
+          _toast('✅ 主线 →「${sc.name}」');
+        } else if (r.choiceIndex < src.choices.length) {
+          _mutate(() => src.choices[r.choiceIndex].next = sc.id);
+          _toast('✅ 选项 →「${sc.name}」');
+        }
+      }
+      setState(_clearModes);
       return;
     }
-    if (_linkFrom == null) {
-      _linkFrom = sc.id;
-      _toast('已选起点「${sc.name}」，再点一个节点作为下一场景');
-    } else if (_linkFrom == sc.id) {
-      _linkFrom = null;
-      _toast('已取消选择');
-    } else {
-      final from = _p!.script.findScene(_linkFrom!);
-      if (from != null) {
-        _mutate(() => from.next = sc.id);
-        _toast('✅ 「${from.name}」→「${sc.name}」已串联');
+    if (_linkMode) {
+      if (_linkFrom == null) {
+        setState(() => _linkFrom = sc.id);
+        if (_linkKind == _LinkKind.choice) {
+          _promptChoiceText(sc);
+        } else {
+          _toast('已选起点「${sc.name}」，再点一个节点作为下一场景');
+        }
+      } else if (_linkFrom == sc.id) {
+        setState(() {
+          _linkFrom = null;
+          _pendingChoiceText = null;
+        });
+        _toast('已取消选择');
+      } else {
+        final from = _p!.script.findScene(_linkFrom!);
+        if (from != null) {
+          if (_linkKind == _LinkKind.next) {
+            _mutate(() => from.next = sc.id);
+            _toast('✅ 主线「${from.name}」→「${sc.name}」');
+          } else {
+            final text = (_pendingChoiceText ?? '').trim();
+            final t = text.isEmpty ? '选项 ${from.choices.length + 1}' : text;
+            _mutate(() => from.choices.add(Choice(text: t, next: sc.id)));
+            _toast('✅ 选项「$t」→「${sc.name}」');
+          }
+        }
+        setState(() {
+          _pendingChoiceText = null;
+          _linkFrom = null;
+        });
       }
-      _linkFrom = null;
+      return;
+    }
+    setState(() => _sel = sc.id);
+  }
+
+  /// 点连线：选中并打开对应编辑面板
+  void _onLinkTap(_LinkKey key) {
+    final p = _p;
+    if (p == null) return;
+    final sc = p.script.findScene(key.sourceId);
+    if (sc == null) return;
+    setState(() => _selLink = key);
+    if (!key.isChoice) {
+      _editNextLinkDialog(sc);
+    } else if (key.index < sc.choices.length) {
+      _editChoiceDialog(null, null, sc, key.index, allowDelete: true);
     }
   }
 
-  Widget _nodeWidget(Scene sc, int i, double w, double h) {
+  /// 选项分支模式：先输入选项文字，再点目标节点
+  Future<void> _promptChoiceText(Scene sc) async {
+    final ctrl = TextEditingController(text: '选项 ${sc.choices.length + 1}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('选项分支'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '选项文字（如：去森林）'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('下一步')),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (ok != true) {
+      setState(_clearModes);
+      return;
+    }
+    setState(() {
+      _pendingChoiceText = ctrl.text.trim();
+      _linkFrom = sc.id;
+    });
+    _toast('已选起点「${sc.name}」，再点一个目标节点完成选项分支');
+  }
+
+  /// 清空所有连线/重设目标模式
+  void _clearModes() {
+    _linkMode = false;
+    _linkFrom = null;
+    _pendingChoiceText = null;
+    _retarget = null;
+  }
+
+  /// 进入“在画布上点选目标”模式（choiceIndex=-1 表示主线）
+  void _startRetarget(String sourceId, int choiceIndex) {
+    final src = _p?.script.findScene(sourceId);
+    setState(() {
+      _clearModes();
+      _retarget = _Retarget(sourceId, choiceIndex);
+    });
+    _toast('🎯 在画布上点目标节点（从「${src?.name ?? sourceId}」出发）');
+  }
+
+  Widget _nodeWidget(Scene sc, int i) {
     final active = sc.id == _sel;
-    final linking = _linkMode && sc.id == _linkFrom;
-    final left = (_rx(sc, i, w) - 76).clamp(4.0, w - 152);
-    final top = (_ry(sc, i, h) - 24).clamp(4.0, h - 120);
+    final linking = (_linkMode && sc.id == _linkFrom) ||
+        (_retarget != null && _retarget!.sourceId == sc.id);
+    final left = (_rx(sc, i) - 76).clamp(4.0, _worldW - 152);
+    final top = (_ry(sc, i) - 24).clamp(4.0, _worldH - 120);
     return Positioned(
       left: left,
       top: top,
@@ -775,6 +1007,47 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Widget _toolbar() {
     final sc = _current();
+    final linkMenu = PopupMenuButton<_LinkAction>(
+      icon: Icon(Icons.link,
+          size: 20,
+          color: (_linkMode || _retarget != null)
+              ? const Color(0xFF4ADE80)
+              : null),
+      tooltip: '连接：主线 / 选项分支 / 管理',
+      onSelected: (a) {
+        switch (a) {
+          case _LinkAction.next:
+            setState(() {
+              _clearModes();
+              _linkMode = true;
+              _linkKind = _LinkKind.next;
+            });
+            _toast('🔗 主线串联模式：点起点节点 → 再点目标节点');
+            break;
+          case _LinkAction.choice:
+            setState(() {
+              _clearModes();
+              _linkMode = true;
+              _linkKind = _LinkKind.choice;
+            });
+            _toast('🔀 选项分支模式：点起点节点，输入选项文字后点目标节点');
+            break;
+          case _LinkAction.manage:
+            if (sc != null) _manageLinks(sc);
+            break;
+        }
+      },
+      itemBuilder: (c) => [
+        const PopupMenuItem(
+            value: _LinkAction.next, child: Text('🔗 设置主线（串联模式）')),
+        const PopupMenuItem(
+            value: _LinkAction.choice, child: Text('🔀 添加选项分支（串联模式）')),
+        if (sc != null)
+          const PopupMenuItem(
+              value: _LinkAction.manage,
+              child: Text('🗂 管理连接（主线/选项列表）')),
+      ],
+    );
     return Container(
       color: const Color(0xFF1C1C22),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -787,19 +1060,12 @@ class _EditorScreenState extends State<EditorScreen> {
                     child: GestureDetector(
                       onTap: _openProjectSettings,
                       child: const Text(
-                        '点空白处创建节点 · 拖动节点移动\n点节点选中，用工具添加内容（点这里改作品标题/简介）',
+                        '点空白处创建节点 · 双指缩放/拖动平移 · 左上角可缩放\n点节点选中，点连线编辑连接（点这里改作品标题/简介）',
                         style: TextStyle(fontSize: 12, color: Colors.white54),
                       ),
                     ),
                   ),
-                  _zoomBtn(),
-                  IconButton(
-                    icon: Icon(Icons.link,
-                        size: 20,
-                        color: _linkMode ? const Color(0xFF4ADE80) : null),
-                    tooltip: '串联模式：点两个节点设置下一场景',
-                    onPressed: _toggleLinkMode,
-                  ),
+                  linkMenu,
                   IconButton(
                     icon: const Icon(Icons.settings_outlined, size: 20),
                     tooltip: '作品设置',
@@ -814,18 +1080,11 @@ class _EditorScreenState extends State<EditorScreen> {
                   const SizedBox(width: 6),
                   _toolBtn(Icons.image_outlined, 'CG', () => _addCgTo(sc)),
                   const SizedBox(width: 6),
-                  _toolBtn(Icons.music_note_outlined, 'BGM',
-                      () => _addBgmTo(sc)),
+                  _toolBtn(
+                      Icons.music_note_outlined, 'BGM', () => _addBgmTo(sc)),
                   const SizedBox(width: 6),
-                  IconButton(
-                    icon: Icon(Icons.link,
-                        size: 20,
-                        color: _linkMode ? const Color(0xFF4ADE80) : null),
-                    tooltip: '串联模式：点两个节点设置下一场景',
-                    onPressed: _toggleLinkMode,
-                  ),
+                  linkMenu,
                   const Spacer(),
-                  _zoomBtn(),
                   IconButton(
                     icon: const Icon(Icons.edit_outlined, size: 20),
                     tooltip: '重命名节点',
@@ -843,23 +1102,103 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  void _toggleLinkMode() {
-    setState(() {
-      _linkMode = !_linkMode;
-      _linkFrom = null;
-    });
-    _toast(_linkMode ? '🔗 串联模式开启：依次点两个节点，前者→后者' : '已退出串联模式');
+  /// 模式提示条（串联/重设目标时显示，可一键取消）
+  Widget _modeBanner() {
+    final r = _retarget;
+    String text;
+    if (r != null) {
+      final src = _p?.script.findScene(r.sourceId);
+      text = '🎯 重设目标：「${src?.name ?? r.sourceId}」→ 点画布上的目标节点';
+    } else if (_linkFrom != null) {
+      final src = _p?.script.findScene(_linkFrom!);
+      text = _linkKind == _LinkKind.choice
+          ? '🔀 选项分支：「${src?.name ?? ''}」→ 再点目标节点'
+          : '🔗 主线串联：「${src?.name ?? ''}」→ 再点目标节点';
+    } else {
+      text = _linkKind == _LinkKind.choice
+          ? '🔀 选项分支模式：点一个节点作为起点'
+          : '🔗 主线串联模式：点一个节点作为起点';
+    }
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFF2A2A33),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(text,
+                style:
+                    const TextStyle(fontSize: 12, color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () => setState(_clearModes),
+            child:
+                const Text('取消', style: TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
   }
 
-  Widget _zoomBtn() {
+  /// 适配全部节点到视口（按钮入口）
+  void _fitBtn() => setState(() => _fitView(_viewW, _viewH));
+
+  /// 角标小按钮
+  Widget _cornerBtn(IconData icon, String tip, VoidCallback onTap) {
     return IconButton(
-      icon: const Icon(Icons.zoom_out_map, size: 20),
-      tooltip: '重置缩放（双指捏合可缩放，单指拖动空白可平移画布）',
-      onPressed: () => setState(() {
-        _viewportScale = 1.0;
-        _viewportOffset = Offset.zero;
-      }),
+      visualDensity: VisualDensity.compact,
+      iconSize: 15,
+      padding: const EdgeInsets.all(4),
+      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+      icon: Icon(icon, color: Colors.white70),
+      tooltip: tip,
+      onPressed: onTap,
     );
+  }
+
+  /// 视口适配：把整个世界缩放到视口内（首次打开/重置时调用）
+  void _fitView(double w, double h) {
+    if (w <= 0 || h <= 0) return;
+    final s = ((w / _worldW) < (h / _worldH) ? (w / _worldW) : (h / _worldH)) *
+        0.92;
+    _viewportScale = s.clamp(0.15, 4.0);
+    _viewportOffset = Offset(
+        (w - _worldW * _viewportScale) / 2,
+        (h - _worldH * _viewportScale) / 2);
+    _clampViewport();
+  }
+
+  /// 以视口中心为锚点缩放（+/- 按钮）
+  void _zoomBy(double factor) {
+    final w = _viewW, h = _viewH;
+    if (w <= 0 || h <= 0) return;
+    setState(() {
+      final ns = (_viewportScale * factor).clamp(0.15, 4.0);
+      final center = Offset(w / 2, h / 2);
+      final canvasAtCenter = (center - _viewportOffset) / _viewportScale;
+      _viewportScale = ns;
+      _viewportOffset = center - canvasAtCenter * ns;
+      _clampViewport();
+    });
+  }
+
+  /// 防止把世界拖出屏幕：至少保留 40px 可视边距
+  void _clampViewport() {
+    final w = _viewW, h = _viewH;
+    if (w <= 0 || h <= 0) return;
+    const m = 40.0;
+    final sw = _worldW * _viewportScale;
+    final sh = _worldH * _viewportScale;
+    double cx(double o, double worldS, double view) {
+      if (worldS <= view) {
+        final base = (view - worldS) / 2;
+        return o.clamp(base - m, base + m);
+      }
+      return o.clamp(view - worldS - m, m);
+    }
+
+    _viewportOffset = Offset(
+        cx(_viewportOffset.dx, sw, w), cx(_viewportOffset.dy, sh, h));
   }
 
   Widget _toolBtn(IconData icon, String label, VoidCallback onTap) {
@@ -1223,13 +1562,15 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   Future<void> _editChoiceDialog(
-      BuildContext c, StateSetter setSheet, Scene sc, int i) async {
+      BuildContext? c, StateSetter? setSheet, Scene sc, int i,
+      {bool allowDelete = false}) async {
     final ch = sc.choices[i];
     final textCtrl = TextEditingController(text: ch.text);
     String next = ch.next;
     final sceneIds = _p!.script.scenes.map((s) => s.id).toList();
+    final ctx = c ?? context;
     await showDialog<void>(
-      context: c,
+      context: ctx,
       builder: (dc) => StatefulBuilder(
         builder: (dc, setD) => AlertDialog(
           title: const Text('编辑选项'),
@@ -1248,6 +1589,20 @@ class _EditorScreenState extends State<EditorScreen> {
             ],
           ),
           actions: [
+            if (allowDelete)
+              TextButton(
+                style:
+                    TextButton.styleFrom(foregroundColor: Colors.redAccent),
+                onPressed: () {
+                  _mutate(() {
+                    sc.choices.removeAt(i);
+                    if (_selLink?.sourceId == sc.id) _selLink = null;
+                  });
+                  setSheet?.call(() {});
+                  Navigator.pop(dc);
+                },
+                child: const Text('删除'),
+              ),
             TextButton(
                 onPressed: () => Navigator.pop(dc),
                 child: const Text('取消')),
@@ -1257,12 +1612,253 @@ class _EditorScreenState extends State<EditorScreen> {
                   ch.text = textCtrl.text.trim();
                   ch.next = next;
                 });
-                setSheet(() {});
+                setSheet?.call(() {});
                 Navigator.pop(dc);
               },
               child: const Text('保存'),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 编辑主线连接：换目标（下拉或画布点选）/ 删除
+  Future<void> _editNextLinkDialog(Scene sc) async {
+    final sceneIds = _p!.script.scenes.map((s) => s.id).toList();
+    String next = sc.next;
+    await showDialog<void>(
+      context: context,
+      builder: (dc) => StatefulBuilder(
+        builder: (dc, setD) => AlertDialog(
+          title: const Text('主线连接'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('从「${sc.name}」出发的主线',
+                  style: const TextStyle(
+                      fontSize: 12, color: Colors.white54)),
+              const SizedBox(height: 8),
+              _dd('跳转到', sceneIds, next, (v) {
+                next = v ?? '';
+              }, showEnd: true,
+                  extraValue: next, key: const ValueKey('d_next_link')),
+              const SizedBox(height: 4),
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.pop(dc);
+                  _startRetarget(sc.id, -1);
+                },
+                icon: const Icon(Icons.touch_app, size: 18),
+                label: const Text('在画布上点选目标'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+              onPressed: () {
+                _mutate(() {
+                  sc.next = '';
+                  _selLink = null;
+                });
+                Navigator.pop(dc);
+              },
+              child: const Text('删除主线'),
+            ),
+            TextButton(
+                onPressed: () => Navigator.pop(dc),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () {
+                _mutate(() {
+                  sc.next = next;
+                  _selLink = null;
+                });
+                Navigator.pop(dc);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 连接管理面板：主线 + 所有选项分支的列表编辑
+  void _manageLinks(Scene sc) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF232329),
+      builder: (c) => StatefulBuilder(
+        builder: (c, setSheet) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                        child: Text('🗂 连接管理',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold))),
+                    IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.pop(c)),
+                  ],
+                ),
+                Text('节点：${sc.name}',
+                    style: const TextStyle(
+                        fontSize: 12, color: Colors.white54)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Expanded(
+                        child: Text('🔗 主线',
+                            style: TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.w600))),
+                    TextButton.icon(
+                      onPressed: () {
+                        Navigator.pop(c);
+                        _startRetarget(sc.id, -1);
+                      },
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('设置主线'),
+                    ),
+                  ],
+                ),
+                if (sc.next.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 6),
+                    child: Text('（未设置：台词播完自动结束）',
+                        style:
+                            TextStyle(fontSize: 12, color: Colors.white54)),
+                  )
+                else
+                  Card(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    color: const Color(0xFF2E2E36),
+                    child: ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.arrow_forward,
+                          size: 18, color: Color(0xFFFFC24B)),
+                      title: Text(_nextLabel(sc.next),
+                          style: const TextStyle(fontSize: 13)),
+                      onTap: () {
+                        Navigator.pop(c);
+                        _editNextLinkDialog(sc);
+                      },
+                      trailing: _miniBtn(Icons.delete_outline, () {
+                        _mutate(() {
+                          sc.next = '';
+                          _selLink = null;
+                        });
+                        setSheet(() {});
+                      }, red: true),
+                    ),
+                  ),
+                const Divider(height: 20),
+                Row(
+                  children: [
+                    const Expanded(
+                        child: Text('🔀 选项分支',
+                            style: TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.w600))),
+                    TextButton.icon(
+                      onPressed: () {
+                        Navigator.pop(c);
+                        setState(() {
+                          _clearModes();
+                          _linkMode = true;
+                          _linkKind = _LinkKind.choice;
+                        });
+                        _toast('🔀 选项分支模式：点起点节点');
+                      },
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('添加选项'),
+                    ),
+                  ],
+                ),
+                if (sc.choices.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 6),
+                    child: Text('（无选项分支）',
+                        style:
+                            TextStyle(fontSize: 12, color: Colors.white54)),
+                  )
+                else
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 260),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: sc.choices.length,
+                      itemBuilder: (c, i) => Card(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        color: const Color(0xFF2E2E36),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.fork_right,
+                                  size: 16, color: Color(0xFFB07CD8)),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () {
+                                    Navigator.pop(c);
+                                    _editChoiceDialog(null, null, sc, i,
+                                        allowDelete: true);
+                                  },
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                          sc.choices[i].text.isEmpty
+                                              ? '（空选项）'
+                                              : sc.choices[i].text,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style:
+                                              const TextStyle(fontSize: 13)),
+                                      Text(_nextLabel(sc.choices[i].next),
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Colors.white38)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              _miniBtn(Icons.arrow_upward, () {
+                                _moveChoice(sc, i, -1);
+                                setSheet(() {});
+                              }),
+                              _miniBtn(Icons.arrow_downward, () {
+                                _moveChoice(sc, i, 1);
+                                setSheet(() {});
+                              }),
+                              _miniBtn(Icons.delete_outline, () {
+                                _mutate(() {
+                                  _delChoice(sc, i);
+                                  if (_selLink?.sourceId == sc.id) {
+                                    _selLink = null;
+                                  }
+                                });
+                                setSheet(() {});
+                              }, red: true),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -2320,13 +2916,57 @@ class _DotGridPainter extends CustomPainter {
   bool shouldRepaint(covariant _DotGridPainter oldDelegate) => false;
 }
 
-/// 场景串联连线：next 主线（金色）+ choices 分支（紫色）
+/// 连接工具栏动作
+enum _LinkAction { next, choice, manage }
+
+/// 串联模式类型：主线（next）或选项分支（choices）
+enum _LinkKind { next, choice }
+
+/// 画布连线标识（用于选中高亮）
+class _LinkKey {
+  final String sourceId;
+  final bool isChoice; // true=选项分支，false=主线 next
+  final int index; // 选项下标（主线恒为 0）
+  const _LinkKey(this.sourceId, this.isChoice, this.index);
+
+  @override
+  bool operator ==(Object o) =>
+      o is _LinkKey &&
+      o.sourceId == sourceId &&
+      o.isChoice == isChoice &&
+      o.index == index;
+
+  @override
+  int get hashCode => Object.hash(sourceId, isChoice, index);
+}
+
+/// 画布重设目标模式：choiceIndex=-1 表示主线 next
+class _Retarget {
+  final String sourceId;
+  final int choiceIndex;
+  const _Retarget(this.sourceId, this.choiceIndex);
+}
+
+/// 生成节点间连线路径（绘制与命中检测共用）
+Path linkPath(Offset a, Offset b) {
+  final dir = b - a;
+  final len = dir.distance;
+  if (len < 40) return Path();
+  final u = dir / len;
+  final start = a + u * 82;
+  final end = b - u * 82;
+  final mid = (start + end) / 2 + const Offset(0, -24);
+  return Path()
+    ..moveTo(start.dx, start.dy)
+    ..quadraticBezierTo(mid.dx, mid.dy, end.dx, end.dy);
+}
+
+/// 场景串联连线：next 主线（金色）+ choices 分支（紫色虚线，带选项文字标签）；选中连线高亮白色
 class _LinkPainter extends CustomPainter {
   final List<Scene> scenes;
   final List<Offset> centers;
-  const _LinkPainter(this.scenes, this.centers, this.w, this.h);
-  final double w;
-  final double h;
+  final _LinkKey? selected;
+  const _LinkPainter(this.scenes, this.centers, this.selected);
 
   Offset _centerOf(Scene sc) {
     final i = scenes.indexOf(sc);
@@ -2336,54 +2976,72 @@ class _LinkPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    Scene? targetOf(String id) {
+      for (final s in scenes) {
+        if (s.id == id) return s;
+      }
+      return null;
+    }
+
     for (final sc in scenes) {
       final a = _centerOf(sc);
       // next 主线：金色实线箭头
       if (sc.next.isNotEmpty) {
-        Scene? t;
-        for (final s in scenes) {
-          if (s.id == sc.next) {
-            t = s;
-            break;
-          }
-        }
+        final t = targetOf(sc.next);
         if (t != null) {
-          _arrow(canvas, a, _centerOf(t), const Color(0xFFFFC24B), 2.5);
+          final sel = selected == _LinkKey(sc.id, false, 0);
+          _arrow(canvas, a, _centerOf(t),
+              sel ? const Color(0xFFFFFFFF) : const Color(0xFFFFC24B),
+              sel ? 4.5 : 2.5);
         }
       }
-      // choices 分支：紫色虚线箭头
-      for (final ch in sc.choices) {
-        if (ch.next.isNotEmpty) {
-          Scene? t;
-          for (final s in scenes) {
-            if (s.id == ch.next) {
-              t = s;
-              break;
-            }
-          }
-          if (t != null) {
-            _arrow(canvas, a, _centerOf(t), const Color(0xFFB07CD8), 2.0,
-                dashed: true);
-          }
+      // choices 分支：紫色虚线箭头 + 选项文字标签
+      for (var i = 0; i < sc.choices.length; i++) {
+        final ch = sc.choices[i];
+        if (ch.next.isEmpty) continue;
+        final t = targetOf(ch.next);
+        if (t == null) continue;
+        final sel = selected == _LinkKey(sc.id, true, i);
+        _arrow(canvas, a, _centerOf(t),
+            sel ? const Color(0xFFFFFFFF) : const Color(0xFFB07CD8),
+            sel ? 3.5 : 2.0,
+            dashed: true);
+        if (ch.text.trim().isNotEmpty) {
+          _label(canvas, a, _centerOf(t), ch.text.trim(), sel);
         }
       }
     }
   }
 
+  void _label(Canvas canvas, Offset a, Offset b, String text, bool sel) {
+    final metrics = linkPath(a, b).computeMetrics().toList();
+    if (metrics.isEmpty) return;
+    final tangent = metrics.first.getTangentForOffset(metrics.first.length / 2);
+    if (tangent == null) return;
+    final pos = tangent.position + const Offset(0, -30);
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontSize: 11,
+          color: Colors.white,
+          backgroundColor:
+              sel ? const Color(0xCC5555FF) : const Color(0xCC5A2E7A),
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
+  }
+
   void _arrow(Canvas canvas, Offset a, Offset b, Color color, double width,
       {bool dashed = false}) {
     if (a == Offset.zero || b == Offset.zero) return;
-    // 从节点边缘开始（节点宽152 高约64）
     final dir = b - a;
     final len = dir.distance;
     if (len < 40) return;
     final u = dir / len;
-    final start = a + u * 82;
-    final end = b - u * 82;
-    final mid = (start + end) / 2 + const Offset(0, -24);
-    final path = Path()
-      ..moveTo(start.dx, start.dy)
-      ..quadraticBezierTo(mid.dx, mid.dy, end.dx, end.dy);
+    final path = linkPath(a, b);
     final paint = Paint()
       ..color = color
       ..strokeWidth = width
@@ -2394,6 +3052,7 @@ class _LinkPainter extends CustomPainter {
       canvas.drawPath(path, paint);
     }
     // 箭头
+    final end = b - u * 82;
     final tip = end - u * 10;
     final arrow = Path()
       ..moveTo(tip.dx, tip.dy)
@@ -2420,6 +3079,5 @@ class _LinkPainter extends CustomPainter {
   bool shouldRepaint(covariant _LinkPainter oldDelegate) =>
       oldDelegate.scenes != scenes ||
       oldDelegate.centers != centers ||
-      oldDelegate.w != w ||
-      oldDelegate.h != h;
+      oldDelegate.selected != selected;
 }
