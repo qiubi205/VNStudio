@@ -632,36 +632,41 @@ class _EditorScreenState extends State<EditorScreen> {
                         }
                       },
                         onScaleEnd: (_) => _dragNodeId = null,
-                        child: ClipRect(
-                          child: Transform(
-                          // 画布扩展倍数越大，节点在屏幕上的绘制尺寸越小。
-                          transform: Matrix4(
-                            1 / _viewportScale, 0, 0, 0, //
-                            0, 1 / _viewportScale, 0, 0, //
-                            0, 0, 1, 0, //
-                            _viewportOffset.dx, _viewportOffset.dy, 0, 1,
-                          ),
-                          child: SizedBox(
-                            width: _worldW,
-                            height: _worldH,
-                            child: Stack(
-                              children: [
-                                const Positioned.fill(
-                                    child: CustomPaint(
-                                        painter: _DotGridPainter())),
-                                Positioned.fill(
-                                    child: CustomPaint(
-                                        painter: _LinkPainter(
-                                            p.script.scenes, centers,
-                                            _selLink))),
-                                for (var i = 0;
-                                    i < p.script.scenes.length;
-                                    i++)
-                                  _nodeWidget(p.script.scenes[i], i),
-                              ],
+                        child: Stack(
+                          children: [
+                            // 背景属于视口，始终铺满屏幕，不参与画布/节点缩放。
+                            const Positioned.fill(
+                                child: CustomPaint(
+                                    painter: _DotGridPainter())),
+                            ClipRect(
+                              child: Transform(
+                                // 画布扩展倍数越大，节点在屏幕上的绘制尺寸越小。
+                                transform: Matrix4(
+                                  1 / _viewportScale, 0, 0, 0, //
+                                  0, 1 / _viewportScale, 0, 0, //
+                                  0, 0, 1, 0, //
+                                  _viewportOffset.dx, _viewportOffset.dy, 0, 1,
+                                ),
+                                child: SizedBox(
+                                  width: _worldW,
+                                  height: _worldH,
+                                  child: Stack(
+                                    children: [
+                                      Positioned.fill(
+                                          child: CustomPaint(
+                                              painter: _LinkPainter(
+                                                  p.script.scenes, centers,
+                                                  _selLink))),
+                                      for (var i = 0;
+                                          i < p.script.scenes.length;
+                                          i++)
+                                        _nodeWidget(p.script.scenes[i], i),
+                                    ],
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
-                          ),
+                          ],
                         ),
                       ),
                     ),

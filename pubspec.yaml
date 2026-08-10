@@ -1,7 +1,7 @@
 name: vn_studio
 description: "VN Studio - 视觉小说创作工坊（Android 原生 APP）"
 publish_to: "none"
-version: 0.1.7+8
+version: 0.1.8+9
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
